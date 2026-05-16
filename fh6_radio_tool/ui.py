@@ -4,8 +4,7 @@ import sys
 import traceback
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QGridLayout, QGroupBox, QLabel,
     QLineEdit, QMainWindow, QMessageBox, QPushButton, QPlainTextEdit, QSlider,
@@ -24,23 +23,28 @@ from .simple_tools import infer_station_name
 from .metadata_tools import METADATA_FILE_NAME, ensure_metadata_file_for_music_dir_to_path
 from .order_tools import FMOD_EXTRACT_TEMPLATE_DIR_NAME, FMOD_REBUILD_WORKSPACE_DIR_NAME, FMOD_READY_WAV_DIR_NAME, TRACK_ORDER_FILE_NAME, import_fmod_extract_folder
 from .wav_tools import list_audio_candidates, natural_key, read_wav_info, validate_wav
+from .wav_preview_player import WavPreviewPlayer
 from .xml_tools import list_station_infos, parse_xml
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("FH6 Radio Tool v3.4 - 发布精简版")
+        self.setWindowTitle("FH6 Radio Tool v3.7 - Bilingual UI")
         self.resize(1280, 940)
 
         self.station_infos = []
         self.current_audio_info = None
         self.marker_spins: dict[str, QSpinBox] = {}
+        self.lang = "zh"
+        self.marker_desc_labels: dict[str, QLabel] = {}
 
-        self.player = QMediaPlayer(self)
-        self.audio_output = QAudioOutput(self)
-        self.player.setAudioOutput(self.audio_output)
-        self.audio_output.setVolume(0.8)
+        # v3.6.4:
+        # Use a custom PCM16 WAV preview player instead of QMediaPlayer.
+        # QMediaPlayer may end/seek WAV playback early on some Windows backends,
+        # which breaks marker editing.  WavPreviewPlayer streams real WAV frames
+        # and reports positions directly in sample units.
+        self.player = WavPreviewPlayer(self)
 
         self.xml_edit = QLineEdit()
         self.music_dir_edit = QLineEdit()
@@ -77,112 +81,247 @@ class MainWindow(QMainWindow):
 
         self._build_layout()
         self.player.positionChanged.connect(self.on_player_position_changed)
-        self.player.durationChanged.connect(self.on_player_duration_changed)
+
+
+    def txt(self, zh: str, en: str) -> str:
+        return en if getattr(self, "lang", "zh") == "en" else zh
+
+    def set_language_from_combo(self, index: int):
+        self.lang = "en" if index == 1 else "zh"
+        self.apply_language()
+
+    def apply_language(self):
+        """Refresh visible UI text after switching language."""
+        self.setWindowTitle(self.txt(
+            "FH6 Radio Tool v3.7 - 双语界面",
+            "FH6 Radio Tool v3.7 - Bilingual UI",
+        ))
+
+        if hasattr(self, "sidebar"):
+            self.sidebar.setTitle(self.txt("操作向导", "Guide"))
+        if hasattr(self, "path_box"):
+            self.path_box.setTitle(self.txt("1. 选择文件", "1. Select files"))
+        if hasattr(self, "station_box"):
+            self.station_box.setTitle(self.txt("2. 准备", "2. Prepare"))
+        if hasattr(self, "mismatch_box"):
+            self.mismatch_box.setTitle(self.txt("3. 校准与生成", "3. Mapping and generation"))
+        if hasattr(self, "calib_box"):
+            self.calib_box.setTitle(self.txt("5. 试听与段落设置", "5. Preview and markers"))
+
+        widget_texts = {
+            "language_label": ("语言 / Language:", "Language / 语言:"),
+            "music_dir_label": ("音乐文件夹:", "Music folder:"),
+            "station_label": ("目标电台:", "Target station:"),
+            "audio_result_label": ("4. 音频校验结果", "4. Audio validation"),
+            "preview_audio_label": ("试听音频:", "Preview audio:"),
+            "write_current_label": ("当前位置写入:", "Write current position to:"),
+            "seconds_label": ("秒数:", "Seconds:"),
+            "sample_label": ("采样点:", "Sample:"),
+            "log_title_label": ("6. 日志", "6. Log"),
+        }
+        for attr, (zh, en) in widget_texts.items():
+            if hasattr(self, attr):
+                getattr(self, attr).setText(self.txt(zh, en))
+
+        button_texts = {
+            "btn_xml": ("选择 XML", "Select XML"),
+            "btn_music": ("选择音乐文件夹", "Select music folder"),
+            "btn_auto": ("自动匹配电台", "Auto-select station"),
+            "btn_validate": ("校验音频", "Validate audio"),
+            "btn_metadata": ("① 歌名表", "① Metadata CSV"),
+            "btn_import_extract": ("② 导入 Extract", "② Import Extract"),
+            "btn_order": ("查看映射", "View mapping"),
+            "btn_write": ("③ 最终生成", "③ Generate"),
+            "btn_refresh": ("刷新可试听 WAV", "Refresh WAV list"),
+            "btn_play": ("播放", "Play"),
+            "btn_pause": ("暂停", "Pause"),
+            "btn_stop": ("停止", "Stop"),
+            "btn_set": ("写入 Marker", "Set marker"),
+            "btn_save": ("保存段落设置", "Save markers"),
+            "btn_save_write": ("保存并重新生成 XML", "Save and regenerate XML"),
+            "btn_sec_to_sample": ("秒 → 采样点", "Seconds → Sample"),
+            "btn_sample_to_sec": ("采样点 → 秒", "Sample → Seconds"),
+        }
+        for attr, (zh, en) in button_texts.items():
+            if hasattr(self, attr):
+                getattr(self, attr).setText(self.txt(zh, en))
+
+        if hasattr(self, "mismatch_tip"):
+            self.mismatch_tip.setText(self.txt(
+                "导入 Extract 后，工具会自动完成映射、替换和音量匹配。",
+                "After importing Extract output, the tool automatically handles mapping, replacement, and loudness matching.",
+            ))
+
+        # Tooltips
+        tips = {
+            "btn_auto": (
+                "根据音乐文件夹名尝试选择对应电台；选错时可手动改下拉框。",
+                "Try to select the station from the music folder name. You can still change it manually.",
+            ),
+            "btn_validate": (
+                "检查采样率、声道、位深；不合规音频最终会自动规范化为 *_fh6_norm.wav。",
+                "Check sample rate, channels, and bit depth. Invalid files will be normalized when generating.",
+            ),
+            "btn_metadata": (
+                "生成 output/track_metadata.csv。",
+                "Create output/track_metadata.csv.",
+            ),
+            "btn_import_extract": (
+                "选择 Fmod Bank Tools 的 Wav Output Directory，生成已替换且音量匹配的 fmod_ready_wav。",
+                "Select the Wav Output Directory from Fmod Bank Tools Extract. The tool will create fmod_ready_wav.",
+            ),
+            "btn_order": (
+                "查看 work/track_order.csv。通常只用于确认；自动校准失败时才手动修正。",
+                "View work/track_order.csv. Usually only needed for debugging.",
+            ),
+            "btn_write": (
+                "生成 XML、fmod_ready_wav 和说明。",
+                "Generate XML and fmod_ready_wav.",
+            ),
+        }
+        for attr, (zh, en) in tips.items():
+            if hasattr(self, attr):
+                getattr(self, attr).setToolTip(self.txt(zh, en))
+
+        self.audio_table.setHorizontalHeaderLabels(
+            self.txt(
+                ["文件名", "后续动作", "当前状态", "采样率", "声道", "位深", "时长(s)", "问题"],
+                ["Filename", "Action", "Status", "Sample rate", "Channels", "Bit depth", "Duration(s)", "Issues"],
+            )
+        )
+
+        marker_desc_en = {
+            "TrackStart": "Song start",
+            "TrackDrop": "Race high point",
+            "TrackLoopStart": "Race loop start",
+            "TrackLoopEnd": "Race loop end",
+            "PostDrop": "Finish/post-race drop",
+            "PostRaceLoopStart": "Post-race loop start",
+            "PostRaceLoopEnd": "Post-race loop end",
+            "DJSegment": "DJ insert point",
+            "StingerStart": "Stinger start",
+            "DJStart": "DJ start",
+            "End": "Song end",
+        }
+        for name, label in self.marker_desc_labels.items():
+            label.setText(self.txt(MARKER_DESCRIPTIONS.get(name, ""), marker_desc_en.get(name, name)))
+            if name in self.marker_spins:
+                self.marker_spins[name].setToolTip(label.text())
+
+        self.output_label.setText(self.txt(
+            f"输出目录：{project_output_dir()}    备份目录：{project_backup_dir()}",
+            f"Output: {project_output_dir()}    Backup: {project_backup_dir()}",
+        ))
+
+        self.update_guide()
+        self.on_station_changed()
 
     def _build_layout(self):
         root = QWidget()
         root_layout = QHBoxLayout(root)
 
-        sidebar = QGroupBox("操作向导")
-        sidebar_layout = QVBoxLayout(sidebar)
+        self.sidebar = QGroupBox()
+        sidebar_layout = QVBoxLayout(self.sidebar)
         sidebar_layout.addWidget(self.guide_text)
-        sidebar.setMaximumWidth(420)
-        sidebar.setMinimumWidth(360)
-        root_layout.addWidget(sidebar, stretch=0)
+        self.sidebar.setMaximumWidth(430)
+        self.sidebar.setMinimumWidth(370)
+        root_layout.addWidget(self.sidebar, stretch=0)
 
         main_panel = QWidget()
         layout = QVBoxLayout(main_panel)
         root_layout.addWidget(main_panel, stretch=1)
 
-        path_box = QGroupBox("1. 选择文件")
-        grid = QGridLayout(path_box)
-        btn_xml = QPushButton("选择 XML")
-        btn_xml.clicked.connect(self.choose_xml)
-        grid.addWidget(QLabel("RadioInfo_CN.xml:"), 0, 0)
-        grid.addWidget(self.xml_edit, 0, 1)
-        grid.addWidget(btn_xml, 0, 2)
+        self.path_box = QGroupBox()
+        grid = QGridLayout(self.path_box)
 
-        btn_music = QPushButton("选择音乐文件夹")
-        btn_music.clicked.connect(self.choose_music_dir)
-        grid.addWidget(QLabel("音乐文件夹:"), 1, 0)
-        grid.addWidget(self.music_dir_edit, 1, 1)
-        grid.addWidget(btn_music, 1, 2)
-        grid.addWidget(self.output_label, 2, 0, 1, 3)
-        layout.addWidget(path_box)
+        self.language_label = QLabel()
+        self.language_combo = QComboBox()
+        self.language_combo.addItems(["中文", "English"])
+        self.language_combo.currentIndexChanged.connect(self.set_language_from_combo)
+        grid.addWidget(self.language_label, 0, 0)
+        grid.addWidget(self.language_combo, 0, 1)
 
-        self.update_guide("start")
+        self.btn_xml = QPushButton()
+        self.btn_xml.clicked.connect(self.choose_xml)
+        grid.addWidget(QLabel("RadioInfo_CN.xml:"), 1, 0)
+        grid.addWidget(self.xml_edit, 1, 1)
+        grid.addWidget(self.btn_xml, 1, 2)
 
-        station_box = QGroupBox("2. 准备")
-        sgrid = QGridLayout(station_box)
+        self.music_dir_label = QLabel()
+        self.btn_music = QPushButton()
+        self.btn_music.clicked.connect(self.choose_music_dir)
+        grid.addWidget(self.music_dir_label, 2, 0)
+        grid.addWidget(self.music_dir_edit, 2, 1)
+        grid.addWidget(self.btn_music, 2, 2)
+        grid.addWidget(self.output_label, 3, 0, 1, 3)
+        layout.addWidget(self.path_box)
+
+        self.station_box = QGroupBox()
+        sgrid = QGridLayout(self.station_box)
         self.station_combo.currentIndexChanged.connect(self.on_station_changed)
-        sgrid.addWidget(QLabel("目标电台:"), 0, 0)
+        self.station_label = QLabel()
+        sgrid.addWidget(self.station_label, 0, 0)
         sgrid.addWidget(self.station_combo, 0, 1, 1, 4)
         sgrid.addWidget(self.station_summary_label, 1, 0, 1, 5)
 
-        btn_auto = QPushButton("自动匹配电台")
-        btn_auto.clicked.connect(self.auto_select_station)
-        btn_auto.setToolTip("根据音乐文件夹名尝试选择对应电台；选错时可手动改下拉框。")
+        self.btn_auto = QPushButton()
+        self.btn_auto.clicked.connect(self.auto_select_station)
 
-        btn_validate = QPushButton("校验音频")
-        btn_validate.clicked.connect(self.validate_music_folder)
-        btn_validate.setToolTip("检查采样率、声道、位深；不合规音频最终会自动规范化为 *_fh6_norm.wav。")
+        self.btn_validate = QPushButton()
+        self.btn_validate.clicked.connect(self.validate_music_folder)
 
-        btn_metadata = QPushButton("① 歌名表")
-        btn_metadata.clicked.connect(self.ensure_metadata_table)
-        btn_metadata.setToolTip("生成 output/track_metadata.csv。")
+        self.btn_metadata = QPushButton()
+        self.btn_metadata.clicked.connect(self.ensure_metadata_table)
 
-        sgrid.addWidget(btn_auto, 2, 0, 1, 2)
-        sgrid.addWidget(btn_validate, 2, 2)
-        sgrid.addWidget(btn_metadata, 2, 3, 1, 2)
-        layout.addWidget(station_box)
+        sgrid.addWidget(self.btn_auto, 2, 0, 1, 2)
+        sgrid.addWidget(self.btn_validate, 2, 2)
+        sgrid.addWidget(self.btn_metadata, 2, 3, 1, 2)
+        layout.addWidget(self.station_box)
 
-        mismatch_box = QGroupBox("3. 校准与生成")
-        mgrid = QGridLayout(mismatch_box)
+        self.mismatch_box = QGroupBox()
+        mgrid = QGridLayout(self.mismatch_box)
 
-        mismatch_tip = QLabel(
-            "导入 Extract 后，工具会自动完成映射、替换和音量匹配。"
-        )
-        mismatch_tip.setWordWrap(True)
-        mgrid.addWidget(mismatch_tip, 0, 0, 1, 4)
+        self.mismatch_tip = QLabel()
+        self.mismatch_tip.setWordWrap(True)
+        mgrid.addWidget(self.mismatch_tip, 0, 0, 1, 4)
 
-        btn_import_extract = QPushButton("② 导入 Extract")
-        btn_import_extract.clicked.connect(self.import_fmod_extract_assets)
-        btn_import_extract.setToolTip("选择 Fmod Bank Tools 的 Wav Output Directory，生成已替换且音量匹配的 fmod_ready_wav。")
+        self.btn_import_extract = QPushButton()
+        self.btn_import_extract.clicked.connect(self.import_fmod_extract_assets)
 
-        btn_order = QPushButton("查看映射")
-        btn_order.clicked.connect(self.show_track_order_info)
-        btn_order.setToolTip("查看 work/track_order.csv。通常只用于确认；自动校准失败时才手动修正。")
+        self.btn_order = QPushButton()
+        self.btn_order.clicked.connect(self.show_track_order_info)
 
-        btn_write = QPushButton("③ 最终生成")
-        btn_write.clicked.connect(self.run_prepare)
-        btn_write.setToolTip("生成 XML、fmod_ready_wav 和说明。")
+        self.btn_write = QPushButton()
+        self.btn_write.clicked.connect(self.run_prepare)
 
-        mgrid.addWidget(btn_import_extract, 1, 0, 1, 2)
-        mgrid.addWidget(btn_order, 1, 2)
-        mgrid.addWidget(btn_write, 1, 3)
-        layout.addWidget(mismatch_box)
+        mgrid.addWidget(self.btn_import_extract, 1, 0, 1, 2)
+        mgrid.addWidget(self.btn_order, 1, 2)
+        mgrid.addWidget(self.btn_write, 1, 3)
+        layout.addWidget(self.mismatch_box)
 
-        layout.addWidget(QLabel("4. 音频校验结果"))
+        self.audio_result_label = QLabel()
+        layout.addWidget(self.audio_result_label)
         layout.addWidget(self.audio_table, stretch=1)
 
-        calib_box = QGroupBox("5. 试听与段落设置")
-        cgrid = QGridLayout(calib_box)
-        btn_refresh = QPushButton("刷新可试听 WAV")
-        btn_refresh.clicked.connect(self.refresh_calibration_audio_list)
+        self.calib_box = QGroupBox()
+        cgrid = QGridLayout(self.calib_box)
+        self.btn_refresh = QPushButton()
+        self.btn_refresh.clicked.connect(self.refresh_calibration_audio_list)
         self.calib_audio_combo.currentIndexChanged.connect(self.on_calibration_audio_changed)
-        cgrid.addWidget(QLabel("试听音频:"), 0, 0)
+        self.preview_audio_label = QLabel()
+        cgrid.addWidget(self.preview_audio_label, 0, 0)
         cgrid.addWidget(self.calib_audio_combo, 0, 1, 1, 4)
-        cgrid.addWidget(btn_refresh, 0, 5)
+        cgrid.addWidget(self.btn_refresh, 0, 5)
 
-        btn_play = QPushButton("播放")
-        btn_play.clicked.connect(self.play_audio)
-        btn_pause = QPushButton("暂停")
-        btn_pause.clicked.connect(self.player.pause)
-        btn_stop = QPushButton("停止")
-        btn_stop.clicked.connect(self.player.stop)
-        cgrid.addWidget(btn_play, 1, 0)
-        cgrid.addWidget(btn_pause, 1, 1)
-        cgrid.addWidget(btn_stop, 1, 2)
+        self.btn_play = QPushButton()
+        self.btn_play.clicked.connect(self.play_audio)
+        self.btn_pause = QPushButton()
+        self.btn_pause.clicked.connect(self.player.pause)
+        self.btn_stop = QPushButton()
+        self.btn_stop.clicked.connect(self.player.stop)
+        cgrid.addWidget(self.btn_play, 1, 0)
+        cgrid.addWidget(self.btn_pause, 1, 1)
+        cgrid.addWidget(self.btn_stop, 1, 2)
         cgrid.addWidget(self.position_label, 1, 3)
         cgrid.addWidget(self.duration_label, 1, 4)
         cgrid.addWidget(self.sample_rate_label, 1, 5)
@@ -194,10 +333,10 @@ class MainWindow(QMainWindow):
             label = QLabel(name + ":")
             spin = QSpinBox()
             spin.setRange(-1, 2_147_483_647)
-            spin.setToolTip(MARKER_DESCRIPTIONS.get(name, ""))
             self.marker_spins[name] = spin
-            desc = QLabel(MARKER_DESCRIPTIONS.get(name, ""))
+            desc = QLabel()
             desc.setWordWrap(True)
+            self.marker_desc_labels[name] = desc
             col = 0 if idx % 2 == 0 else 3
             if idx % 2 == 0 and idx != 0:
                 row += 1
@@ -206,104 +345,182 @@ class MainWindow(QMainWindow):
             cgrid.addWidget(desc, row, col + 2)
 
         row += 1
-        cgrid.addWidget(QLabel("当前位置写入:"), row, 0)
+        self.write_current_label = QLabel()
+        cgrid.addWidget(self.write_current_label, row, 0)
         cgrid.addWidget(self.marker_target_combo, row, 1)
-        btn_set = QPushButton("写入 Marker")
-        btn_set.clicked.connect(self.set_marker_from_current_position)
-        btn_save = QPushButton("保存段落设置")
-        btn_save.clicked.connect(self.save_current_segments)
-        btn_save_write = QPushButton("保存并重新生成 XML")
-        btn_save_write.clicked.connect(self.save_segments_and_write_xml)
-        cgrid.addWidget(btn_set, row, 2)
-        cgrid.addWidget(btn_save, row, 3)
-        cgrid.addWidget(btn_save_write, row, 4, 1, 2)
+        self.btn_set = QPushButton()
+        self.btn_set.clicked.connect(self.set_marker_from_current_position)
+        self.btn_save = QPushButton()
+        self.btn_save.clicked.connect(self.save_current_segments)
+        self.btn_save_write = QPushButton()
+        self.btn_save_write.clicked.connect(self.save_segments_and_write_xml)
+        cgrid.addWidget(self.btn_set, row, 2)
+        cgrid.addWidget(self.btn_save, row, 3)
+        cgrid.addWidget(self.btn_save_write, row, 4, 1, 2)
 
         row += 1
-        cgrid.addWidget(QLabel("秒数:"), row, 0)
+        self.seconds_label = QLabel()
+        cgrid.addWidget(self.seconds_label, row, 0)
         cgrid.addWidget(self.seconds_spin, row, 1)
-        btn_sec_to_sample = QPushButton("秒 → 采样点")
-        btn_sec_to_sample.clicked.connect(self.convert_seconds_to_sample)
-        cgrid.addWidget(btn_sec_to_sample, row, 2)
-        cgrid.addWidget(QLabel("采样点:"), row, 3)
+        self.btn_sec_to_sample = QPushButton()
+        self.btn_sec_to_sample.clicked.connect(self.convert_seconds_to_sample)
+        cgrid.addWidget(self.btn_sec_to_sample, row, 2)
+        self.sample_label = QLabel()
+        cgrid.addWidget(self.sample_label, row, 3)
         cgrid.addWidget(self.sample_spin, row, 4)
-        btn_sample_to_sec = QPushButton("采样点 → 秒")
-        btn_sample_to_sec.clicked.connect(self.convert_sample_to_seconds)
-        cgrid.addWidget(btn_sample_to_sec, row, 5)
-        layout.addWidget(calib_box)
+        self.btn_sample_to_sec = QPushButton()
+        self.btn_sample_to_sec.clicked.connect(self.convert_sample_to_seconds)
+        cgrid.addWidget(self.btn_sample_to_sec, row, 5)
+        layout.addWidget(self.calib_box)
 
-        layout.addWidget(QLabel("5. 日志"))
+        self.log_title_label = QLabel()
+        layout.addWidget(self.log_title_label)
         layout.addWidget(self.log_box, stretch=1)
         self.setCentralWidget(root)
+
+        self.apply_language()
 
     def update_guide(self, stage: str = ""):
         xml_ok = bool(self.xml_edit.text().strip())
         music_ok = bool(self.music_dir_edit.text().strip())
         station_ok = self.station_combo.currentIndex() >= 0
 
-        status = [
-            f"XML：{'✓ 已选' if xml_ok else '未选'}",
-            f"音乐：{'✓ 已选' if music_ok else '未选'}",
-            f"电台：{'✓ 已选' if station_ok else '未选'}",
-        ]
+        if self.lang == "en":
+            status = [
+                f"XML: {'✓ selected' if xml_ok else 'not selected'}",
+                f"Music: {'✓ selected' if music_ok else 'not selected'}",
+                f"Station: {'✓ selected' if station_ok else 'not selected'}",
+            ]
 
-        next_step = "选择 RadioInfo_CN.xml"
-        if xml_ok and not music_ok:
-            next_step = "选择音乐文件夹"
-        elif xml_ok and music_ok and not station_ok:
-            next_step = "选择目标电台"
-        elif stage == "metadata":
-            next_step = "编辑 output/track_metadata.csv"
-        elif stage == "import_extract":
-            next_step = "点击 ③ 最终生成"
-        elif stage == "generated":
-            next_step = "用 output/fmod_ready_wav 重构 bank"
-        elif xml_ok and music_ok and station_ok:
-            next_step = "校验音频 → ① 歌名表 → ② 导入 Extract → ③ 最终生成"
+            next_step = "Select RadioInfo_CN.xml"
+            if xml_ok and not music_ok:
+                next_step = "Select the music folder"
+            elif xml_ok and music_ok and not station_ok:
+                next_step = "Select target station"
+            elif stage == "metadata":
+                next_step = "Edit output/track_metadata.csv"
+            elif stage == "import_extract":
+                next_step = "Click ③ Generate"
+            elif stage == "generated":
+                next_step = "Rebuild bank with output/fmod_ready_wav"
+            elif xml_ok and music_ok and station_ok:
+                next_step = "Validate audio → ① Metadata CSV → ② Import Extract → ③ Generate"
 
-        lines = [
-            "完整流程",
-            "1. 选择 RadioInfo_CN.xml",
-            "2. 选择音乐文件夹",
-            "3. 选择电台并校验音频",
-            "4. 点 ① 歌名表",
-            "   编辑 output/track_metadata.csv",
-            "   只改 display_name / artist",
-            "5. 用 Fmod Bank Tools Extract 原 bank",
-            "6. 点 ② 导入 Extract",
-            "   选择 Fmod 的 wav 输出目录",
-            "7. 点 ③ 最终生成",
-            "",
-            "生成后使用",
-            "XML：output/RadioInfo_CN.xml",
-            "WAV：output/fmod_ready_wav",
-            "在 Fmod Bank Tools 中：",
-            "Wav Output Directory 选 fmod_ready_wav",
-            "Bank/Build/Cache 按 READ_ME 设置",
-            "",
-            "工具会自动完成",
-            "✓ SampleLength 映射",
-            "✓ sound_x.wav 平行替换",
-            "✓ 音量匹配",
-            "",
-            "段落字段速查",
-            "TrackStart：歌曲正式开始",
-            "TrackDrop：比赛中高潮/副歌",
-            "TrackLoopStart/End：比赛中循环段",
-            "PostDrop：冲线或赛后高潮",
-            "PostRaceLoopStart/End：赛后循环段",
-            "DJSegment / DJStart：DJ 语音位置",
-            "StingerStart：短转场音效点",
-            "End：歌曲结束点",
-            "",
-            "设置建议",
-            "只填有把握的点；不确定就先保留默认。",
-            "循环段应能自然从 End 接回 Start。",
-            "",
-            "当前状态",
-            *status,
-            "",
-            f"下一步：{next_step}",
-        ]
+            lines = [
+                "Workflow",
+                "1. Select RadioInfo_CN.xml",
+                "2. Select your music folder",
+                "3. Select station and validate audio",
+                "4. Click ① Metadata CSV",
+                "   Edit output/track_metadata.csv",
+                "   Only edit display_name / artist",
+                "5. Use Fmod Bank Tools to Extract the original bank",
+                "6. Click ② Import Extract",
+                "   Select Fmod WAV output directory",
+                "7. Click ③ Generate",
+                "",
+                "After generation",
+                "XML: output/RadioInfo_CN.xml",
+                "WAV: output/fmod_ready_wav",
+                "In Fmod Bank Tools:",
+                "Wav Output Directory = fmod_ready_wav",
+                "",
+                "The tool automatically handles",
+                "✓ SampleLength mapping",
+                "✓ sound_x.wav parallel replacement",
+                "✓ loudness matching",
+                "",
+                "Marker quick guide",
+                "TrackStart: song start",
+                "TrackDrop: race chorus/drop",
+                "TrackLoopStart/End: race loop",
+                "PostDrop: finish/post-race drop",
+                "PostRaceLoopStart/End: post-race loop",
+                "DJSegment / DJStart: DJ voice position",
+                "StingerStart: short transition cue",
+                "End: song end",
+                "",
+                "Preview note",
+                "Slider uses real WAV sample positions.",
+                "Preview uses the built-in WAV player.",
+                "",
+                "Tip",
+                "Only set markers you are confident about.",
+                "Loop end should return naturally to loop start.",
+                "",
+                "Current status",
+                *status,
+                "",
+                f"Next step: {next_step}",
+            ]
+        else:
+            status = [
+                f"XML：{'✓ 已选' if xml_ok else '未选'}",
+                f"音乐：{'✓ 已选' if music_ok else '未选'}",
+                f"电台：{'✓ 已选' if station_ok else '未选'}",
+            ]
+
+            next_step = "选择 RadioInfo_CN.xml"
+            if xml_ok and not music_ok:
+                next_step = "选择音乐文件夹"
+            elif xml_ok and music_ok and not station_ok:
+                next_step = "选择目标电台"
+            elif stage == "metadata":
+                next_step = "编辑 output/track_metadata.csv"
+            elif stage == "import_extract":
+                next_step = "点击 ③ 最终生成"
+            elif stage == "generated":
+                next_step = "用 output/fmod_ready_wav 重构 bank"
+            elif xml_ok and music_ok and station_ok:
+                next_step = "校验音频 → ① 歌名表 → ② 导入 Extract → ③ 最终生成"
+
+            lines = [
+                "完整流程",
+                "1. 选择 RadioInfo_CN.xml",
+                "2. 选择音乐文件夹",
+                "3. 选择电台并校验音频",
+                "4. 点 ① 歌名表",
+                "   编辑 output/track_metadata.csv",
+                "   只改 display_name / artist",
+                "5. 用 Fmod Bank Tools Extract 原 bank",
+                "6. 点 ② 导入 Extract",
+                "   选择 Fmod 的 wav 输出目录",
+                "7. 点 ③ 最终生成",
+                "",
+                "生成后使用",
+                "XML：output/RadioInfo_CN.xml",
+                "WAV：output/fmod_ready_wav",
+                "在 Fmod Bank Tools 中：",
+                "Wav Output Directory 选 fmod_ready_wav",
+                "",
+                "工具会自动完成",
+                "✓ SampleLength 映射",
+                "✓ sound_x.wav 平行替换",
+                "✓ 音量匹配",
+                "",
+                "段落字段速查",
+                "TrackStart：歌曲正式开始",
+                "TrackDrop：比赛中高潮/副歌",
+                "TrackLoopStart/End：比赛中循环段",
+                "PostDrop：冲线或赛后高潮",
+                "PostRaceLoopStart/End：赛后循环段",
+                "DJSegment / DJStart：DJ 语音位置",
+                "StingerStart：短转场音效点",
+                "End：歌曲结束点",
+                "",
+                "试听提示",
+                "进度条按 WAV 真实采样点定位。",
+                "试听使用内置 WAV 播放器。",
+                "",
+                "设置建议",
+                "只填有把握的点；不确定就先保留默认。",
+                "循环段应能自然从 End 接回 Start。",
+                "",
+                "当前状态",
+                *status,
+                "",
+                f"下一步：{next_step}",
+            ]
 
         self.guide_text.setPlainText("\n".join(lines))
 
@@ -324,17 +541,17 @@ class MainWindow(QMainWindow):
 
 
     def choose_xml(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择 RadioInfo_CN.xml", "", "XML Files (*.xml);;All Files (*)")
+        path, _ = QFileDialog.getOpenFileName(self, self.txt("选择 RadioInfo_CN.xml", "Select RadioInfo_CN.xml"), "", "XML Files (*.xml);;All Files (*)")
         if path:
             self.xml_edit.setText(path)
             self.load_xml(Path(path))
             self.update_guide("xml")
 
     def choose_music_dir(self):
-        path = QFileDialog.getExistingDirectory(self, "选择音乐文件夹")
+        path = QFileDialog.getExistingDirectory(self, self.txt("选择音乐文件夹", "Select music folder"))
         if path:
             self.music_dir_edit.setText(path)
-            self.output_label.setText(f"输出目录：{project_output_dir()}    备份目录：{project_backup_dir()}")
+            self.output_label.setText(self.txt(f"输出目录：{project_output_dir()}    备份目录：{project_backup_dir()}", f"Output: {project_output_dir()}    Backup: {project_backup_dir()}"))
             self.validate_music_folder()
             self.refresh_calibration_audio_list()
             self.auto_select_station(silent=True)
@@ -348,7 +565,7 @@ class MainWindow(QMainWindow):
             self.station_combo.clear()
             for info in self.station_infos:
                 rates = ",".join(str(x) for x in info.sample_rates) or "unknown"
-                self.station_combo.addItem(f"{info.name} | 槽位 {info.track_slot_count} | SR {rates}", info.name)
+                self.station_combo.addItem(self.txt(f"{info.name} | 槽位 {info.track_slot_count} | SR {rates}", f"{info.name} | Slots {info.track_slot_count} | SR {rates}"), info.name)
             self.station_combo.blockSignals(False)
             self.log(f"[OK] 已加载 XML: {path}")
             self.log(f"[OK] 识别到 {len(self.station_infos)} 个电台")
@@ -366,11 +583,14 @@ class MainWindow(QMainWindow):
     def on_station_changed(self):
         info = self.current_station_info()
         if info is None:
-            self.station_summary_label.setText("目标电台：请先选择 XML")
+            self.station_summary_label.setText(self.txt("目标电台：请先选择 XML", "Target station: please select XML first"))
             return
         banks = ", ".join(info.banks)
         rates = ", ".join(str(x) for x in info.sample_rates) or "unknown"
-        self.station_summary_label.setText(f"电台：{info.name} | Track槽位={info.track_slot_count} | SampleRate={rates} | Banks=[{banks}]")
+        self.station_summary_label.setText(self.txt(
+            f"电台：{info.name} | Track槽位={info.track_slot_count} | SampleRate={rates} | Banks=[{banks}]",
+            f"Station: {info.name} | Track slots={info.track_slot_count} | SampleRate={rates} | Banks=[{banks}]",
+        ))
 
     def auto_select_station(self, silent: bool = False):
         xml = self.xml_path()
@@ -413,10 +633,10 @@ class MainWindow(QMainWindow):
             else:
                 sr = ch = bits = duration = "-"
             if r.ok:
-                status, action = "OK", "原地使用"
+                status, action = "OK", self.txt("原地使用", "Use as-is")
                 ok_count += 1
             else:
-                status, action = "需要规范化", "FFmpeg -> 同目录 *_fh6_norm.wav"
+                status, action = self.txt("需要规范化", "Normalize"), "FFmpeg -> *_fh6_norm.wav"
                 need_norm_count += 1
             problems = "; ".join(r.errors + r.warnings)
             for col, value in enumerate([path.name, action, status, sr, ch, bits, duration, problems]):
@@ -433,7 +653,7 @@ class MainWindow(QMainWindow):
     def ensure_metadata_table(self):
         folder = self.music_dir()
         if folder is None or not folder.exists():
-            QMessageBox.warning(self, "缺少音乐文件夹", "请先选择音乐文件夹")
+            QMessageBox.warning(self, self.txt("缺少音乐文件夹", "Missing music folder"), self.txt("请先选择音乐文件夹", "Please select a music folder first"))
             return
 
         info = self.current_station_info()
@@ -450,9 +670,11 @@ class MainWindow(QMainWindow):
             self.update_guide("metadata")
             QMessageBox.information(
                 self,
-                "歌名表已生成",
-                f"已生成/刷新：\n{path}\n\n"
-                "请编辑 display_name 与 artist 列，然后点击“③ 最终生成 txt 与 XML”。"
+                self.txt("歌名表已生成", "Metadata CSV created"),
+                self.txt(
+                    f"已生成/刷新：\n{path}\n\n请编辑 display_name 与 artist 列，然后点击“③ 最终生成”。",
+                    f"Created/refreshed:\n{path}\n\nEdit the display_name and artist columns, then click ③ Generate.",
+                )
             )
         except Exception as exc:
             self.show_error("生成歌名表失败", exc)
@@ -460,12 +682,12 @@ class MainWindow(QMainWindow):
     def import_fmod_extract_assets(self):
         folder = self.music_dir()
         if folder is None:
-            QMessageBox.warning(self, "缺少音乐文件夹", "请先选择音乐文件夹")
+            QMessageBox.warning(self, self.txt("缺少音乐文件夹", "Missing music folder"), self.txt("请先选择音乐文件夹", "Please select a music folder first"))
             return
 
         path = QFileDialog.getExistingDirectory(
             self,
-            "选择 Fmod Bank Tools Extract 后的 Wav Output Directory"
+            self.txt("选择 Fmod Bank Tools Extract 后的 Wav Output Directory", "Select the Wav Output Directory from Fmod Bank Tools Extract")
         )
         if not path:
             return
@@ -477,10 +699,11 @@ class MainWindow(QMainWindow):
             self.update_guide("import_extract")
             QMessageBox.information(
                 self,
-                "导入完成",
-                f"已导入 Extract 模板。\n\n"
-                "请点击“③ 最终生成 txt 与 XML”。\n"
-                "工具会生成 output/fmod_ready_wav，后续在 Fmod Bank Tools 中把它作为 Wav Output Directory。"
+                self.txt("导入完成", "Import complete"),
+                self.txt(
+                    "已导入 Extract 模板。\n\n请点击“③ 最终生成”。\n工具会生成 output/fmod_ready_wav，后续在 Fmod Bank Tools 中把它作为 Wav Output Directory。",
+                    "Extract template imported.\n\nClick ③ Generate.\nThe tool will create output/fmod_ready_wav. Use it as the Wav Output Directory in Fmod Bank Tools.",
+                )
             )
         except Exception as exc:
             self.show_error("导入 Fmod Extract 模板失败", exc)
@@ -488,58 +711,58 @@ class MainWindow(QMainWindow):
     def show_track_order_info(self):
         folder = self.music_dir()
         if folder is None:
-            QMessageBox.warning(self, "缺少音乐文件夹", "请先选择音乐文件夹")
+            QMessageBox.warning(self, self.txt("缺少音乐文件夹", "Missing music folder"), self.txt("请先选择音乐文件夹", "Please select a music folder first"))
             return
         path = project_work_dir() / TRACK_ORDER_FILE_NAME
         self.log(f"[INFO] 槽位映射表: {path}")
         QMessageBox.information(
             self,
-            "槽位映射表",
-            f"槽位映射表位置：\n{path}\n\n"
-            "请先点击“生成 txt 与 XML”生成它。\n"
-            "如果出现歌名和实际播放不对应，请编辑此 CSV：\n"
-            "- slot_index 表示 XML 槽位\n"
-            "- sound_name 是原游戏资源名，请勿改\n"
-            "- audio_filename 是实际打包的 wav 文件名\n"
-            "- display_name / artist 是游戏中显示的名称\n\n"
-            "调整后重新点击“③ 最终生成 txt 与 XML”。"
+            self.txt("槽位映射表", "Mapping table"),
+            self.txt(
+                f"槽位映射表位置：\n{path}\n\n通常只用于调试。调整后重新点击“③ 最终生成”。",
+                f"Mapping table location:\n{path}\n\nUsually only needed for debugging. After editing it, click ③ Generate again.",
+            )
         )
 
     def run_prepare(self):
         xml, music, station = self.xml_path(), self.music_dir(), self.station_combo.currentData()
         if not xml:
-            QMessageBox.warning(self, "缺少 XML", "请先选择 RadioInfo_CN.xml")
+            QMessageBox.warning(self, self.txt("缺少 XML", "Missing XML"), self.txt("请先选择 RadioInfo_CN.xml", "Please select RadioInfo_CN.xml first"))
             return
         if not music:
-            QMessageBox.warning(self, "缺少音乐文件夹", "请先选择音乐文件夹")
+            QMessageBox.warning(self, self.txt("缺少音乐文件夹", "Missing music folder"), self.txt("请先选择音乐文件夹", "Please select a music folder first"))
             return
         if not station:
-            QMessageBox.warning(self, "缺少电台", "请先选择目标电台")
+            QMessageBox.warning(self, self.txt("缺少电台", "Missing station"), self.txt("请先选择目标电台", "Please select a target station first"))
             return
 
         try:
             result = prepare_project_outputs(xml, music, station)
             assets_text = ", ".join(str(p) for p in result.output_assets_txts)
-            self.log("[OK] 已生成 txt 与 XML")
-            self.log(f"  输出目录: {result.output_dir}")
-            self.log(f"  备份目录: {result.backup_dir}")
+            self.log(self.txt("[OK] 已生成 XML 和 fmod_ready_wav", "[OK] Generated XML and fmod_ready_wav"))
+            self.log(self.txt(f"  输出目录: {result.output_dir}", f"  Output folder: {result.output_dir}"))
+            self.log(self.txt(f"  备份目录: {result.backup_dir}", f"  Backup folder: {result.backup_dir}"))
             if result.backup_snapshot_dir:
                 self.log(f"  本次备份: {result.backup_snapshot_dir}")
-            self.log(f"  目标电台: {result.station_name}")
-            self.log(f"  使用音频: {result.used_count}")
+            self.log(self.txt(f"  目标电台: {result.station_name}", f"  Target station: {result.station_name}"))
+            self.log(self.txt(f"  使用音频: {result.used_count}", f"  Used audio: {result.used_count}"))
             self.log(f"  原地使用合规音频: {result.original_count}")
             self.log(f"  FFmpeg规范化音频: {result.normalized_count}")
             self.log(f"  丢弃音频: {result.discarded_count}")
-            self.log(f"  输出 XML: {result.output_xml}")
-            self.log(f"  已替换并匹配音量的音乐文件夹: {project_output_dir() / FMOD_READY_WAV_DIR_NAME}")
-            self.log(f"  已替换并匹配音量的音乐文件夹: {project_output_dir() / FMOD_READY_WAV_DIR_NAME}")
-            self.log("  bank 重构：请用户自行使用 Fmod Bank Tools 完成。")
+            self.log(self.txt(f"  输出 XML: {result.output_xml}", f"  Output XML: {result.output_xml}"))
+            self.log(self.txt(f"  已替换并匹配音量的音乐文件夹: {project_output_dir() / FMOD_READY_WAV_DIR_NAME}", f"  Ready WAV folder: {project_output_dir() / FMOD_READY_WAV_DIR_NAME}"))
+            self.log(self.txt("  bank 重构：请使用 Fmod Bank Tools 完成。", "  Bank rebuild: use Fmod Bank Tools."))
             self.update_guide("generated")
             self.refresh_calibration_audio_list()
             self.validate_music_folder()
-            QMessageBox.information(self, "生成完成", "已生成 txt 与 XML。\\n\\n"
-                                    f"输出 XML：{result.output_xml}\\n"
-                                    "请使用 output/fmod_ready_wav 在 Fmod Bank Tools 中重构 bank。")
+            QMessageBox.information(
+                self,
+                self.txt("生成完成", "Generation complete"),
+                self.txt(
+                    f"已生成 XML 和 fmod_ready_wav。\n\n输出 XML：{result.output_xml}\n请使用 output/fmod_ready_wav 在 Fmod Bank Tools 中重构 bank。",
+                    f"XML and fmod_ready_wav generated.\n\nOutput XML: {result.output_xml}\nUse output/fmod_ready_wav to rebuild the bank in Fmod Bank Tools.",
+                )
+            )
         except InvalidAudioError as exc:
             lines = ["存在无法规范化或不符合要求的音频："]
             for file, errors in exc.invalid_files.items():
@@ -586,10 +809,18 @@ class MainWindow(QMainWindow):
             self.show_error("读取试听音频失败", exc)
             return
         self.current_audio_info = info
-        self.player.setSource(QUrl.fromLocalFile(str(path.resolve())))
+        self.player.set_source(path.resolve())
         max_sample = max(0, info.sample_length - 1)
         for spin in list(self.marker_spins.values()) + [self.sample_spin]:
             spin.setMaximum(min(2_147_483_647, max_sample))
+
+        # v3.6.2 修复：
+        # QMediaPlayer.durationChanged 在部分 WAV/后端上可能返回偏短时长，
+        # 导致进度条拖到最右边时音乐实际还没结束，进而写入错误 End。
+        # 因此进度条不再使用播放器返回的 duration_ms，
+        # 而是直接使用 WAV header 的真实 sample/frame 数。
+        self.position_slider.setRange(0, max_sample)
+
         self.sample_rate_label.setText(f"sample rate: {info.samplerate} Hz")
         self.duration_label.setText(f"duration: {info.duration_sec:.3f}s / {info.sample_length} samples")
         self.load_markers_for_current_audio()
@@ -614,32 +845,36 @@ class MainWindow(QMainWindow):
 
     def play_audio(self):
         if self.current_audio_info is None:
-            QMessageBox.warning(self, "未选择音频", "请先刷新并选择一个 WAV 文件")
+            QMessageBox.warning(self, self.txt("未选择音频", "No audio selected"), self.txt("请先刷新并选择一个 WAV 文件", "Please refresh and select a WAV file first"))
             return
         self.player.play()
 
-    def seek_player(self, value: int):
-        self.player.setPosition(value)
-
-    def on_player_duration_changed(self, duration_ms: int):
-        self.position_slider.setRange(0, max(0, duration_ms))
-
-    def on_player_position_changed(self, position_ms: int):
-        self.position_slider.blockSignals(True)
-        self.position_slider.setValue(position_ms)
-        self.position_slider.blockSignals(False)
-        sample = 0
-        seconds = position_ms / 1000.0
-        if self.current_audio_info is not None:
-            sample = seconds_to_sample(seconds, self.current_audio_info.samplerate)
-            sample = min(sample, max(0, self.current_audio_info.sample_length - 1))
+    def _update_position_label_from_sample(self, sample: int) -> None:
+        if self.current_audio_info is None:
+            self.position_label.setText("0.000s / sample 0")
+            return
+        sample = max(0, min(int(sample), max(0, self.current_audio_info.sample_length - 1)))
+        seconds = sample_to_seconds(sample, self.current_audio_info.samplerate)
         self.position_label.setText(f"{seconds:.3f}s / sample {sample}")
+
+    def seek_player(self, value: int):
+        # QSlider 的 value 就是真实 WAV sample position。
+        sample = int(value)
+        self.player.seek_sample(sample)
+        self._update_position_label_from_sample(sample)
+
+    def on_player_position_changed(self, sample: int):
+        # WavPreviewPlayer 直接回报 sample，不经过毫秒换算。
+        sample = int(sample)
+        self.position_slider.blockSignals(True)
+        self.position_slider.setValue(sample)
+        self.position_slider.blockSignals(False)
+        self._update_position_label_from_sample(sample)
 
     def current_sample_from_player(self) -> int:
         if self.current_audio_info is None:
             return 0
-        return min(seconds_to_sample(self.player.position() / 1000.0, self.current_audio_info.samplerate),
-                   max(0, self.current_audio_info.sample_length - 1))
+        return max(0, min(int(self.position_slider.value()), max(0, self.current_audio_info.sample_length - 1)))
 
     def set_marker_from_current_position(self):
         sample = self.current_sample_from_player()
@@ -660,19 +895,19 @@ class MainWindow(QMainWindow):
     def save_current_segments(self):
         info, seg_path = self.current_audio_info, self.segments_path()
         if info is None:
-            QMessageBox.warning(self, "未选择音频", "请先选择一个 WAV 文件")
+            QMessageBox.warning(self, self.txt("未选择音频", "No audio selected"), self.txt("请先选择一个 WAV 文件", "Please select a WAV file first"))
             return
         if seg_path is None:
-            QMessageBox.warning(self, "缺少音乐文件夹", "请先选择音乐文件夹")
+            QMessageBox.warning(self, self.txt("缺少音乐文件夹", "Missing music folder"), self.txt("请先选择音乐文件夹", "Please select a music folder first"))
             return
         markers = self.current_markers_from_ui()
         positions = markers.positions
         if "End" in positions and "TrackStart" in positions and positions["End"] < positions["TrackStart"]:
-            QMessageBox.warning(self, "Marker 不合法", "End 不能小于 TrackStart")
+            QMessageBox.warning(self, self.txt("Marker 不合法", "Invalid marker"), self.txt("End 不能小于 TrackStart", "End cannot be earlier than TrackStart"))
             return
         for start_name, end_name in [("TrackLoopStart", "TrackLoopEnd"), ("PostRaceLoopStart", "PostRaceLoopEnd")]:
             if start_name in positions and end_name in positions and positions[end_name] < positions[start_name]:
-                QMessageBox.warning(self, "Marker 不合法", f"{end_name} 不能小于 {start_name}")
+                QMessageBox.warning(self, self.txt("Marker 不合法", "Invalid marker"), self.txt(f"{end_name} 不能小于 {start_name}", f"{end_name} cannot be earlier than {start_name}"))
                 return
         save_audio_markers(seg_path, info, markers)
         self.log(f"[OK] 已保存段落设置: {info.filename} -> {markers_to_json(markers)}")

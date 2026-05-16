@@ -220,3 +220,101 @@ cleanup_env.bat    卸载环境
 ```
 
 中文 bat 和英文 bat 功能完全相同。
+
+
+## v3.6.2 修复
+
+修复试听进度条可能提前到达末尾的问题。
+
+原因是部分 WAV 文件或 Qt 多媒体后端返回的播放器 duration 可能短于 WAV header 中的真实采样长度。旧版本使用播放器 duration 设置进度条范围，可能导致：
+
+```text
+进度条拖到最右边
+但音乐实际还没播放到结尾
+写入 End marker 过早
+游戏内自定义音乐提前结束
+```
+
+v3.6.2 起，试听进度条改为直接使用 WAV 的真实 sample/frame 数定位，不再使用播放器返回的 duration 作为滑条范围。
+
+如果你之前已经保存过错误的 End，请重新打开对应音乐，把进度条拖到最右侧，并重新写入 `End`。
+
+
+## v3.6.3 修复
+
+修复自定义音乐在游戏内可能提前结束的问题。
+
+v3.6.2 只修复了试听进度条的采样点定位，但没有覆盖另一类更关键的问题：部分 `RadioInfo_CN.xml` 会把 `TrackStart`、`End`、`TrackLoopStart` 等字段作为 `Sample` 属性保存，例如：
+
+```xml
+<Sample TrackStart="0" End="123456" ... />
+```
+
+旧版工具只写入了子节点形式：
+
+```xml
+<Marker Name="End" Position="999999" />
+```
+
+如果游戏实际读取的是属性 `End`，那么旧的 `End` 仍然会生效，导致新歌提前结束。
+
+v3.6.3 起，工具会同时写入：
+
+```text
+Sample 属性形式：End="..."
+Marker 子节点形式：<Marker Name="End" Position="..." />
+```
+
+如果你之前已经生成过提前结束的 XML，请重新点击 `③ 最终生成`。如果你曾手动保存过错误 End，请重新把进度条拖到最右侧并写入一次 End。
+
+
+## v3.6.4 修复
+
+修复工具内“试听与段落设置”阶段自定义音乐预览可能提前结束的问题。
+
+旧版本使用 Qt `QMediaPlayer` 预览 WAV。部分 Windows 多媒体后端对 WAV 的 duration / seek / EOF 处理可能不稳定，表现为：
+
+```text
+工具显示的时长看起来正确
+但试听拖动或播放时会提前结束
+导致用户无法可靠设置 End / Loop 等 Marker
+```
+
+v3.6.4 起，试听模块改为内置 PCM16 WAV 播放器：
+
+```text
+直接读取 WAV frame
+直接按 sample 位置播放和拖动
+进度条 value = 真实 sample position
+不再依赖 QMediaPlayer duration / position
+```
+
+因此，“试听进度条末尾”和“WAV 真实末尾”现在是一致的。
+
+
+## v3.7 双语界面
+
+v3.7 新增中英文界面切换。
+
+在工具顶部可以选择：
+
+```text
+中文
+English
+```
+
+切换后会更新：
+
+- 左侧操作向导；
+- 主要按钮；
+- 分组标题；
+- 音频校验表头；
+- Marker 简短说明；
+- 常用弹窗提示。
+
+核心功能不变，仍然保留：
+
+- SampleLength 自动映射；
+- sound_x.wav 平行替换；
+- 基础音量匹配；
+- 内置 WAV 试听播放器。

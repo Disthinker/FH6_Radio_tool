@@ -121,11 +121,31 @@ def build_track_patches(
 
 
 def _set_marker(sample: ET.Element, name: str, position: int) -> None:
+    """Write a marker in both supported forms.
+
+    Some RadioInfo files store markers as Sample attributes, e.g.
+
+        <Sample TrackStart="0" End="123456" ... />
+
+    Older versions of this tool only wrote child Marker nodes, e.g.
+
+        <Marker Name="End" Position="123456" />
+
+    If the game reads the attribute form, the old End attribute would remain
+    unchanged and custom music could stop early even though the generated child
+    marker looked correct.  Therefore we now update both forms.
+    """
+    value = str(int(position))
+
+    # Attribute form used by many RadioInfo samples.
+    sample.set(name, value)
+
+    # Child-node form kept for compatibility with files/tools that use it.
     for marker in sample.findall("Marker"):
         if marker.get("Name") == name:
-            marker.set("Position", str(position))
+            marker.set("Position", value)
             return
-    ET.SubElement(sample, "Marker", {"Name": name, "Position": str(position)})
+    ET.SubElement(sample, "Marker", {"Name": name, "Position": value})
 
 
 def patch_station_samples(
@@ -155,6 +175,10 @@ def patch_station_samples(
         sample.set("SampleRate", str(patch.audio.samplerate))
         sample.set("DisplayName", patch.display_name)
         sample.set("Artist", patch.artist)
+
+        # v3.6.3 重要修复：
+        # End / TrackStart / TrackLoopStart 等不仅要写 Marker 子节点，
+        # 也必须写回 Sample 属性。否则游戏可能继续使用旧属性值。
 
         if "IsXCloudModeSafe" in sample.attrib:
             sample.set("IsXCloudModeSafe", "true")
