@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
 from .bank_tools import is_track_bank_name
 from .core import PrepareOptions, prepare_dry_run
+from .metadata_tools import load_track_metadata
 from .models import AudioInfo, SegmentMarkers, TrackPatch
 from .order_tools import FMOD_EXTRACT_TEMPLATE_DIR_NAME, FMOD_REBUILD_WORKSPACE_DIR_NAME, FMOD_READY_WAV_DIR_NAME, TRACK_ORDER_FILE_NAME, create_fmod_rebuild_workspace, ensure_track_order_file, read_track_order, validate_track_order
-from .segment_tools import markers_from_json
+from .segment_tools import load_segments, markers_from_json
 from .xml_tools import patch_station_samples, write_xml
 from .xml_tools import find_station, parse_xml, station_info_from_node
+from .wav_tools import read_wav_info
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,15 @@ class ProjectPrepareResult:
     discarded_count: int
     discarded_files: list[str]
     backup_snapshot_dir: Path | None
+
+
+@dataclass(frozen=True)
+class XmlRegenerateResult:
+    station_name: str
+    output_xml: Path
+    output_dir: Path
+    changed_slots: int
+
 
 
 def project_root() -> Path:
@@ -251,13 +262,152 @@ def _patch_xml_by_track_order(
     write_xml(patched, output_xml)
 
 
-def prepare_project_outputs(xml_path: Path, music_dir: Path, station_name: str) -> ProjectPrepareResult:
+def _audio_maps_from_ready_wav_or_music(
+    rows,
+    music_dir: Path,
+    ready_wav_dir: Path,
+) -> dict[str, AudioInfo]:
+    """Build AudioInfo map without running normalization or loudness matching.
+
+    Used by the lightweight XML-only regeneration path.
+    Preference:
+    1. output/fmod_ready_wav/<original_wav_relpath> because this is the exact
+       audio that will be rebuilt into the bank after full Generate.
+    2. music_dir/<audio_filename> as fallback.
+    """
+    result: dict[str, AudioInfo] = {}
+    music_dir = Path(music_dir)
+    ready_wav_dir = Path(ready_wav_dir)
+
+    for row in rows:
+        if not row.audio_filename:
+            continue
+
+        candidates: list[Path] = []
+        if row.original_wav_relpath:
+            candidates.append(ready_wav_dir / row.original_wav_relpath)
+        candidates.append(music_dir / row.audio_filename)
+
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                try:
+                    info = read_wav_info(candidate)
+                    # Key by original user-facing audio filename because
+                    # track_order.csv rows refer to audio_filename.
+                    result[row.audio_filename] = AudioInfo(
+                        path=info.path,
+                        filename=row.audio_filename,
+                        samplerate=info.samplerate,
+                        channels=info.channels,
+                        bits_per_sample=info.bits_per_sample,
+                        frames=info.frames,
+                        duration_sec=info.duration_sec,
+                    )
+                    break
+                except Exception:
+                    continue
+
+    return result
+
+
+def _marker_maps_from_segments_file(path: Path, audio_by_filename: dict[str, AudioInfo]) -> dict[str, SegmentMarkers]:
+    markers: dict[str, SegmentMarkers] = {}
+    if not Path(path).exists():
+        return markers
+
+    data = load_segments(path)
+    items = data.get("items", {}) if isinstance(data, dict) else {}
+    for filename, item in items.items():
+        if not isinstance(item, dict):
+            continue
+        raw_markers = item.get("markers")
+        if not isinstance(raw_markers, dict):
+            continue
+        try:
+            markers[filename] = markers_from_json(raw_markers, audio_by_filename.get(filename))
+        except Exception:
+            continue
+    return markers
+
+
+def regenerate_xml_only(xml_path: Path, music_dir: Path, station_name: str) -> XmlRegenerateResult:
+    """Lightweight path for marker/metadata-only edits.
+
+    This does NOT:
+    - normalize audio;
+    - rebuild fmod_ready_wav;
+    - run loudness matching;
+    - rebuild track mapping.
+
+    It only reuses existing work/track_order.csv + output/track_metadata.csv +
+    work/segments.json to rewrite output/RadioInfo_CN.xml.
+    """
+    out, _bak, work = ensure_project_dirs()
+    output_xml = out / Path(xml_path).name
+    track_order_path = work / TRACK_ORDER_FILE_NAME
+    metadata_path = out / "track_metadata.csv"
+    segments_path = work / "segments.json"
+    ready_wav_dir = out / FMOD_READY_WAV_DIR_NAME
+
+    if not track_order_path.exists():
+        raise FileNotFoundError(
+            "Missing work/track_order.csv. Please run ③ Generate once before using XML-only regeneration."
+        )
+
+    rows = read_track_order(track_order_path)
+    if not rows:
+        raise ValueError("work/track_order.csv is empty. Please run ③ Generate again.")
+
+    audio_by_filename = _audio_maps_from_ready_wav_or_music(rows, Path(music_dir), ready_wav_dir)
+    missing_audio = [
+        row.audio_filename for row in rows
+        if row.audio_filename and row.audio_filename not in audio_by_filename
+    ]
+    if missing_audio:
+        preview = "\n".join(f"- {x}" for x in missing_audio[:10])
+        raise FileNotFoundError(
+            "Cannot rewrite XML only because some prepared audio files were not found.\n"
+            "Please run full ③ Generate again.\n"
+            + preview
+        )
+
+    metadata = load_track_metadata(metadata_path)
+    refreshed_rows = []
+    for row in rows:
+        meta = metadata.get(row.audio_filename)
+        if meta:
+            refreshed_rows.append(replace(row, display_name=meta.display_name, artist=meta.artist))
+        else:
+            refreshed_rows.append(row)
+
+    markers_by_filename = _marker_maps_from_segments_file(segments_path, audio_by_filename)
+
+    _patch_xml_by_track_order(
+        Path(xml_path),
+        station_name,
+        output_xml,
+        refreshed_rows,
+        audio_by_filename,
+        markers_by_filename,
+    )
+
+    return XmlRegenerateResult(
+        station_name=station_name,
+        output_xml=output_xml,
+        output_dir=out,
+        changed_slots=len([r for r in refreshed_rows if r.audio_filename]),
+    )
+
+
+def prepare_project_outputs(xml_path: Path, music_dir: Path, station_name: str, progress_callback=None) -> ProjectPrepareResult:
     out, bak, work = ensure_project_dirs()
     prepare_work = work / "prepare"
     if prepare_work.exists():
         shutil.rmtree(prepare_work, ignore_errors=True)
     prepare_work.mkdir(parents=True, exist_ok=True)
 
+    if progress_callback:
+        progress_callback(3, "Backing up XML...")
     backup_snapshot = backup_original_xml(xml_path)
 
     # 用户可见文件尽量只放 output；中间映射与 Extract 模板放 work。
@@ -267,6 +417,8 @@ def prepare_project_outputs(xml_path: Path, music_dir: Path, station_name: str) 
     extract_template_dir = work / FMOD_EXTRACT_TEMPLATE_DIR_NAME
 
     # 第一次 prepare 负责：音频校验/规范化、生成 adopted_files、生成 metadata/segments 中间信息。
+    if progress_callback:
+        progress_callback(10, "Checking and normalizing audio...")
     result = prepare_dry_run(
         PrepareOptions(
             xml_path=Path(xml_path),
@@ -280,10 +432,14 @@ def prepare_project_outputs(xml_path: Path, music_dir: Path, station_name: str) 
         )
     )
 
+    if progress_callback:
+        progress_callback(97, "Cleaning final output folder...")
     cleanup_output_dir()
 
     adopted_files = list(result.get("adopted_files", []))
 
+    if progress_callback:
+        progress_callback(35, "Building XML-to-FMOD track mapping...")
     ensure_track_order_file(
         track_order_path,
         Path(xml_path),
@@ -301,6 +457,8 @@ def prepare_project_outputs(xml_path: Path, music_dir: Path, station_name: str) 
             "track_order.csv 存在无法应用的问题：\n" + "\n".join(order_errors)
         )
 
+    if progress_callback:
+        progress_callback(48, "Writing patched XML...")
     output_xml = out / Path(xml_path).name
     markers_by_filename = _marker_maps_from_prepare_result(result)
     _patch_xml_by_track_order(
@@ -325,11 +483,14 @@ def prepare_project_outputs(xml_path: Path, music_dir: Path, station_name: str) 
     # v2.9：真正给 Fmod Bank Tools 使用的是这个工作区。
     # 它保留原 Extract txt 和 wav 文件名，只替换音频内容，避免显示名/实际音频错位。
     if extract_template_dir.exists():
+        if progress_callback:
+            progress_callback(58, "Creating fmod_ready_wav...")
         create_fmod_rebuild_workspace(
             out,
             extract_template_dir,
             rows,
             audio_by_filename,
+            progress_callback=progress_callback,
         )
         # 用户最终只需要 fmod_ready_wav；辅助 bank/build/cache 目录移动到 work。
         aux_ws = out / FMOD_REBUILD_WORKSPACE_DIR_NAME
@@ -366,6 +527,10 @@ def prepare_project_outputs(xml_path: Path, music_dir: Path, station_name: str) 
         encoding="utf-8",
     )
 
+    if progress_callback:
+        progress_callback(98, "Finalizing public output...")
     finalize_public_output(output_xml, metadata_path)
 
+    if progress_callback:
+        progress_callback(100, "Generation complete.")
     return pr

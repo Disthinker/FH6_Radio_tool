@@ -2,18 +2,19 @@ from __future__ import annotations
 
 import sys
 import traceback
+import json
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QObject, QThread, Signal, QTimer
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QGridLayout, QGroupBox, QLabel,
     QLineEdit, QMainWindow, QMessageBox, QPushButton, QPlainTextEdit, QSlider,
-    QSpinBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QHBoxLayout, QWidget, QSizePolicy
+    QSpinBox, QDoubleSpinBox, QProgressBar, QTableWidget, QTableWidgetItem, QVBoxLayout, QHBoxLayout, QWidget, QSizePolicy
 )
 
 from .core import InvalidAudioError
 from .models import SegmentMarkers
-from .project_tools import prepare_project_outputs, project_backup_dir, project_output_dir, project_work_dir
+from .project_tools import prepare_project_outputs, regenerate_xml_only, project_backup_dir, project_output_dir, project_work_dir
 from .segment_tools import (
     MARKER_DESCRIPTIONS, MARKER_ORDER, SEGMENTS_FILE_NAME, load_segments,
     markers_from_json, markers_to_json, sample_to_seconds, save_audio_markers,
@@ -27,10 +28,42 @@ from .wav_preview_player import WavPreviewPlayer
 from .xml_tools import list_station_infos, parse_xml
 
 
+
+class PrepareWorker(QObject):
+    finished = Signal(object)
+    invalid_audio = Signal(object)
+    failed = Signal(object)
+    progress = Signal(int, str)
+
+    def __init__(self, xml: Path, music: Path, station: str):
+        super().__init__()
+        self.xml = Path(xml)
+        self.music = Path(music)
+        self.station = station
+
+    def run(self):
+        try:
+            def report(value: int, message: str):
+                self.progress.emit(int(value), str(message))
+
+            report(1, "Starting generation...")
+            result = prepare_project_outputs(
+                self.xml,
+                self.music,
+                self.station,
+                progress_callback=report,
+            )
+            self.finished.emit(result)
+        except InvalidAudioError as exc:
+            self.invalid_audio.emit(exc)
+        except Exception as exc:
+            self.failed.emit(exc)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("FH6 Radio Tool v3.7 - Bilingual UI")
+        self.setWindowTitle("FH6 Radio Tool v3.7.4 - Bilingual UI")
         self.resize(1280, 940)
 
         self.station_infos = []
@@ -38,6 +71,14 @@ class MainWindow(QMainWindow):
         self.marker_spins: dict[str, QSpinBox] = {}
         self.lang = "zh"
         self.marker_desc_labels: dict[str, QLabel] = {}
+        self.prepare_thread: QThread | None = None
+        self.prepare_worker: PrepareWorker | None = None
+        self.is_generating = False
+        self.progress_timer = QTimer(self)
+        self.progress_timer.setInterval(1000)
+        self.progress_timer.timeout.connect(self.on_generate_heartbeat)
+        self.progress_elapsed = 0
+        self.current_progress_message = ""
 
         # v3.6.4:
         # Use a custom PCM16 WAV preview player instead of QMediaPlayer.
@@ -81,6 +122,7 @@ class MainWindow(QMainWindow):
 
         self._build_layout()
         self.player.positionChanged.connect(self.on_player_position_changed)
+        self.load_session()
 
 
     def txt(self, zh: str, en: str) -> str:
@@ -89,12 +131,13 @@ class MainWindow(QMainWindow):
     def set_language_from_combo(self, index: int):
         self.lang = "en" if index == 1 else "zh"
         self.apply_language()
+        self.save_session()
 
     def apply_language(self):
         """Refresh visible UI text after switching language."""
         self.setWindowTitle(self.txt(
-            "FH6 Radio Tool v3.7 - 双语界面",
-            "FH6 Radio Tool v3.7 - Bilingual UI",
+            "FH6 Radio Tool v3.7.4 - 双语界面",
+            "FH6 Radio Tool v3.7.4 - Bilingual UI",
         ))
 
         if hasattr(self, "sidebar"):
@@ -138,7 +181,7 @@ class MainWindow(QMainWindow):
             "btn_stop": ("停止", "Stop"),
             "btn_set": ("写入 Marker", "Set marker"),
             "btn_save": ("保存段落设置", "Save markers"),
-            "btn_save_write": ("保存并重新生成 XML", "Save and regenerate XML"),
+            "btn_save_write": ("保存并重写 XML", "Save and rewrite XML"),
             "btn_sec_to_sample": ("秒 → 采样点", "Seconds → Sample"),
             "btn_sample_to_sec": ("采样点 → 秒", "Sample → Seconds"),
         }
@@ -151,6 +194,8 @@ class MainWindow(QMainWindow):
                 "导入 Extract 后，工具会自动完成映射、替换和音量匹配。",
                 "After importing Extract output, the tool automatically handles mapping, replacement, and loudness matching.",
             ))
+        if hasattr(self, "generate_progress_label") and not self.is_generating:
+            self.generate_progress_label.setText(self.txt("等待生成。", "Ready to generate."))
 
         # Tooltips
         tips = {
@@ -215,6 +260,128 @@ class MainWindow(QMainWindow):
 
         self.update_guide()
         self.on_station_changed()
+
+
+    def session_path(self) -> Path:
+        return project_work_dir() / "ui_session.json"
+
+    def save_session(self):
+        try:
+            project_work_dir().mkdir(parents=True, exist_ok=True)
+            data = {
+                "lang": self.lang,
+                "xml": self.xml_edit.text().strip(),
+                "music_dir": self.music_dir_edit.text().strip(),
+                "station": self.station_combo.currentData() or "",
+            }
+            self.session_path().write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def load_session(self):
+        try:
+            path = self.session_path()
+            if not path.exists():
+                return
+            data = json.loads(path.read_text(encoding="utf-8"))
+
+            lang = data.get("lang", "zh")
+            if hasattr(self, "language_combo"):
+                self.language_combo.setCurrentIndex(1 if lang == "en" else 0)
+
+            xml_text = data.get("xml") or ""
+            music_text = data.get("music_dir") or ""
+            station = data.get("station") or ""
+
+            if xml_text and Path(xml_text).exists():
+                self.xml_edit.setText(xml_text)
+                self.load_xml(Path(xml_text))
+
+            if music_text and Path(music_text).exists():
+                self.music_dir_edit.setText(music_text)
+                self.output_label.setText(self.txt(
+                    f"输出目录：{project_output_dir()}    备份目录：{project_backup_dir()}",
+                    f"Output: {project_output_dir()}    Backup: {project_backup_dir()}",
+                ))
+                self.refresh_calibration_audio_list()
+
+            if station:
+                for i in range(self.station_combo.count()):
+                    if self.station_combo.itemData(i) == station:
+                        self.station_combo.setCurrentIndex(i)
+                        break
+
+            self.update_guide("start")
+            self.log(self.txt("[OK] 已恢复上次选择的路径", "[OK] Restored last selected paths"))
+        except Exception as exc:
+            self.log(self.txt(f"[WARN] 恢复上次会话失败: {exc}", f"[WARN] Failed to restore previous session: {exc}"))
+
+
+    def set_generate_progress(self, value: int, message: str):
+        value = max(0, min(100, int(value)))
+        self.current_progress_message = message
+        if hasattr(self, "generate_progress_bar"):
+            self.generate_progress_bar.show()
+            self.generate_progress_bar.setValue(value)
+        if hasattr(self, "generate_progress_label"):
+            self.generate_progress_label.show()
+            self.generate_progress_label.setText(self.txt(
+                f"正在生成：{message}",
+                f"Generating: {message}",
+            ))
+
+    def on_generate_heartbeat(self):
+        if not self.is_generating:
+            return
+        self.progress_elapsed += 1
+        if hasattr(self, "generate_progress_bar"):
+            current = self.generate_progress_bar.value()
+            # Keep the bar animated without jumping ahead of real work too much.
+            # Real per-track callbacks update the value during fmod_ready_wav creation.
+            if current < 88 and self.progress_elapsed % 5 == 0:
+                self.generate_progress_bar.setValue(current + 1)
+        if hasattr(self, "generate_progress_label"):
+            dots = "." * ((self.progress_elapsed % 3) + 1)
+            msg = self.current_progress_message or self.txt("后台任务仍在工作", "Background task is still running")
+            self.generate_progress_label.setText(self.txt(
+                f"正在生成：{msg}{dots} 已用时 {self.progress_elapsed}s",
+                f"Generating: {msg}{dots} Elapsed {self.progress_elapsed}s",
+            ))
+
+    def reset_generate_progress(self):
+        self.progress_elapsed = 0
+        self.current_progress_message = ""
+        if hasattr(self, "generate_progress_bar"):
+            self.generate_progress_bar.setValue(0)
+            self.generate_progress_bar.hide()
+        if hasattr(self, "generate_progress_label"):
+            self.generate_progress_label.hide()
+
+    def set_busy(self, busy: bool):
+        self.is_generating = busy
+        for attr in [
+            "btn_xml", "btn_music", "btn_auto", "btn_validate", "btn_metadata",
+            "btn_import_extract", "btn_order", "btn_write", "btn_refresh",
+            "btn_set", "btn_save", "btn_save_write",
+        ]:
+            if hasattr(self, attr):
+                getattr(self, attr).setEnabled(not busy)
+        if hasattr(self, "station_combo"):
+            self.station_combo.setEnabled(not busy)
+        if hasattr(self, "language_combo"):
+            self.language_combo.setEnabled(not busy)
+
+        if busy:
+            self.progress_elapsed = 0
+            self.set_generate_progress(1, self.txt("准备开始", "Starting"))
+            self.progress_timer.start()
+        else:
+            self.progress_timer.stop()
+
+        self.setWindowTitle(self.txt(
+            "FH6 Radio Tool v3.7.4 - 正在生成..." if busy else "FH6 Radio Tool v3.7.4 - 双语界面",
+            "FH6 Radio Tool v3.7.4 - Generating..." if busy else "FH6 Radio Tool v3.7.4 - Bilingual UI",
+        ))
 
     def _build_layout(self):
         root = QWidget()
@@ -297,6 +464,18 @@ class MainWindow(QMainWindow):
         mgrid.addWidget(self.btn_import_extract, 1, 0, 1, 2)
         mgrid.addWidget(self.btn_order, 1, 2)
         mgrid.addWidget(self.btn_write, 1, 3)
+
+        self.generate_progress_label = QLabel()
+        self.generate_progress_label.setWordWrap(True)
+        self.generate_progress_bar = QProgressBar()
+        self.generate_progress_bar.setRange(0, 100)
+        self.generate_progress_bar.setValue(0)
+        self.generate_progress_bar.setTextVisible(True)
+        self.generate_progress_bar.hide()
+        self.generate_progress_label.hide()
+        mgrid.addWidget(self.generate_progress_label, 2, 0, 1, 4)
+        mgrid.addWidget(self.generate_progress_bar, 3, 0, 1, 4)
+
         layout.addWidget(self.mismatch_box)
 
         self.audio_result_label = QLabel()
@@ -546,16 +725,17 @@ class MainWindow(QMainWindow):
             self.xml_edit.setText(path)
             self.load_xml(Path(path))
             self.update_guide("xml")
+            self.save_session()
 
     def choose_music_dir(self):
         path = QFileDialog.getExistingDirectory(self, self.txt("选择音乐文件夹", "Select music folder"))
         if path:
             self.music_dir_edit.setText(path)
             self.output_label.setText(self.txt(f"输出目录：{project_output_dir()}    备份目录：{project_backup_dir()}", f"Output: {project_output_dir()}    Backup: {project_backup_dir()}"))
-            self.validate_music_folder()
             self.refresh_calibration_audio_list()
             self.auto_select_station(silent=True)
             self.update_guide("music")
+            self.save_session()
 
     def load_xml(self, path: Path):
         try:
@@ -591,6 +771,7 @@ class MainWindow(QMainWindow):
             f"电台：{info.name} | Track槽位={info.track_slot_count} | SampleRate={rates} | Banks=[{banks}]",
             f"Station: {info.name} | Track slots={info.track_slot_count} | SampleRate={rates} | Banks=[{banks}]",
         ))
+        self.save_session()
 
     def auto_select_station(self, silent: bool = False):
         xml = self.xml_path()
@@ -701,8 +882,8 @@ class MainWindow(QMainWindow):
                 self,
                 self.txt("导入完成", "Import complete"),
                 self.txt(
-                    "已导入 Extract 模板。\n\n请点击“③ 最终生成”。\n工具会生成 output/fmod_ready_wav，后续在 Fmod Bank Tools 中把它作为 Wav Output Directory。",
-                    "Extract template imported.\n\nClick ③ Generate.\nThe tool will create output/fmod_ready_wav. Use it as the Wav Output Directory in Fmod Bank Tools.",
+                    "Extract 已导入。\n\n下一步：点击“③ 最终生成”。",
+                    "Extract imported.\n\nNext: click ③ Generate.",
                 )
             )
         except Exception as exc:
@@ -717,14 +898,22 @@ class MainWindow(QMainWindow):
         self.log(f"[INFO] 槽位映射表: {path}")
         QMessageBox.information(
             self,
-            self.txt("槽位映射表", "Mapping table"),
+            self.txt("映射表", "Mapping table"),
             self.txt(
-                f"槽位映射表位置：\n{path}\n\n通常只用于调试。调整后重新点击“③ 最终生成”。",
-                f"Mapping table location:\n{path}\n\nUsually only needed for debugging. After editing it, click ③ Generate again.",
+                f"映射表位置：\n{path}\n\n普通用户通常不需要修改它。",
+                f"Mapping table location:\n{path}\n\nMost users do not need to edit this file.",
             )
         )
 
     def run_prepare(self):
+        if self.is_generating:
+            QMessageBox.information(
+                self,
+                self.txt("正在生成", "Generating"),
+                self.txt("当前正在生成，请等待完成。", "Generation is already running. Please wait."),
+            )
+            return
+
         xml, music, station = self.xml_path(), self.music_dir(), self.station_combo.currentData()
         if not xml:
             QMessageBox.warning(self, self.txt("缺少 XML", "Missing XML"), self.txt("请先选择 RadioInfo_CN.xml", "Please select RadioInfo_CN.xml first"))
@@ -736,48 +925,130 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, self.txt("缺少电台", "Missing station"), self.txt("请先选择目标电台", "Please select a target station first"))
             return
 
-        try:
-            result = prepare_project_outputs(xml, music, station)
-            assets_text = ", ".join(str(p) for p in result.output_assets_txts)
-            self.log(self.txt("[OK] 已生成 XML 和 fmod_ready_wav", "[OK] Generated XML and fmod_ready_wav"))
-            self.log(self.txt(f"  输出目录: {result.output_dir}", f"  Output folder: {result.output_dir}"))
-            self.log(self.txt(f"  备份目录: {result.backup_dir}", f"  Backup folder: {result.backup_dir}"))
-            if result.backup_snapshot_dir:
-                self.log(f"  本次备份: {result.backup_snapshot_dir}")
-            self.log(self.txt(f"  目标电台: {result.station_name}", f"  Target station: {result.station_name}"))
-            self.log(self.txt(f"  使用音频: {result.used_count}", f"  Used audio: {result.used_count}"))
-            self.log(f"  原地使用合规音频: {result.original_count}")
-            self.log(f"  FFmpeg规范化音频: {result.normalized_count}")
-            self.log(f"  丢弃音频: {result.discarded_count}")
-            self.log(self.txt(f"  输出 XML: {result.output_xml}", f"  Output XML: {result.output_xml}"))
-            self.log(self.txt(f"  已替换并匹配音量的音乐文件夹: {project_output_dir() / FMOD_READY_WAV_DIR_NAME}", f"  Ready WAV folder: {project_output_dir() / FMOD_READY_WAV_DIR_NAME}"))
-            self.log(self.txt("  bank 重构：请使用 Fmod Bank Tools 完成。", "  Bank rebuild: use Fmod Bank Tools."))
-            self.update_guide("generated")
-            self.refresh_calibration_audio_list()
-            self.validate_music_folder()
-            QMessageBox.information(
-                self,
-                self.txt("生成完成", "Generation complete"),
-                self.txt(
-                    f"已生成 XML 和 fmod_ready_wav。\n\n输出 XML：{result.output_xml}\n请使用 output/fmod_ready_wav 在 Fmod Bank Tools 中重构 bank。",
-                    f"XML and fmod_ready_wav generated.\n\nOutput XML: {result.output_xml}\nUse output/fmod_ready_wav to rebuild the bank in Fmod Bank Tools.",
-                )
+        self.save_session()
+        self.set_busy(True)
+        self.log(self.txt(
+            "[INFO] 开始后台生成。音频复制和音量匹配可能需要一些时间，窗口不会再卡死。",
+            "[INFO] Background generation started. Copying and loudness matching may take some time; the window should remain responsive.",
+        ))
+
+        self.prepare_thread = QThread(self)
+        self.prepare_worker = PrepareWorker(xml, music, station)
+        self.prepare_worker.moveToThread(self.prepare_thread)
+
+        self.prepare_thread.started.connect(self.prepare_worker.run)
+        self.prepare_worker.progress.connect(self.on_prepare_progress)
+        self.prepare_worker.finished.connect(self.on_prepare_success)
+        self.prepare_worker.invalid_audio.connect(self.on_prepare_invalid_audio)
+        self.prepare_worker.failed.connect(self.on_prepare_failed)
+
+        self.prepare_worker.finished.connect(self.prepare_thread.quit)
+        self.prepare_worker.invalid_audio.connect(self.prepare_thread.quit)
+        self.prepare_worker.failed.connect(self.prepare_thread.quit)
+        self.prepare_thread.finished.connect(self.cleanup_prepare_worker)
+
+        self.prepare_thread.start()
+
+    def on_prepare_progress(self, value: int, message: str):
+        self.set_generate_progress(value, message)
+        self.log(self.txt(f"[进度] {value}% {message}", f"[Progress] {value}% {message}"))
+
+    def cleanup_prepare_worker(self):
+        if self.prepare_worker is not None:
+            self.prepare_worker.deleteLater()
+            self.prepare_worker = None
+        if self.prepare_thread is not None:
+            self.prepare_thread.deleteLater()
+            self.prepare_thread = None
+        self.set_busy(False)
+
+    def on_prepare_success(self, result):
+        self.set_generate_progress(100, self.txt("生成完成", "Generation complete"))
+        self.log(self.txt("[OK] 已生成 XML 和 fmod_ready_wav", "[OK] Generated XML and fmod_ready_wav"))
+        self.log(self.txt(f"  输出目录: {result.output_dir}", f"  Output folder: {result.output_dir}"))
+        self.log(self.txt(f"  备份目录: {result.backup_dir}", f"  Backup folder: {result.backup_dir}"))
+        if result.backup_snapshot_dir:
+            self.log(self.txt(f"  本次备份: {result.backup_snapshot_dir}", f"  Backup snapshot: {result.backup_snapshot_dir}"))
+        self.log(self.txt(f"  目标电台: {result.station_name}", f"  Target station: {result.station_name}"))
+        self.log(self.txt(f"  使用音频: {result.used_count}", f"  Used audio: {result.used_count}"))
+        self.log(self.txt(f"  原地使用合规音频: {result.original_count}", f"  Used as-is: {result.original_count}"))
+        self.log(self.txt(f"  FFmpeg规范化音频: {result.normalized_count}", f"  Normalized audio: {result.normalized_count}"))
+        self.log(self.txt(f"  丢弃音频: {result.discarded_count}", f"  Discarded audio: {result.discarded_count}"))
+        self.log(self.txt(f"  输出 XML: {result.output_xml}", f"  Output XML: {result.output_xml}"))
+        self.log(self.txt(
+            f"  已替换并匹配音量的音乐文件夹: {project_output_dir() / FMOD_READY_WAV_DIR_NAME}",
+            f"  Ready WAV folder: {project_output_dir() / FMOD_READY_WAV_DIR_NAME}",
+        ))
+        self.log(self.txt("  bank 重构：请使用 Fmod Bank Tools 完成。", "  Bank rebuild: use Fmod Bank Tools."))
+        self.update_guide("generated")
+        self.refresh_calibration_audio_list()
+        QMessageBox.information(
+            self,
+            self.txt("生成完成", "Generation complete"),
+            self.txt(
+                f"已生成 XML 和 fmod_ready_wav。\n\n输出 XML：{result.output_xml}\n\n下一步：在 Fmod Bank Tools 中使用 output/fmod_ready_wav 重构 bank。",
+                f"XML and fmod_ready_wav generated.\n\nOutput XML: {result.output_xml}\n\nNext: use output/fmod_ready_wav in Fmod Bank Tools to rebuild the bank.",
             )
-        except InvalidAudioError as exc:
-            lines = ["存在无法规范化或不符合要求的音频："]
-            for file, errors in exc.invalid_files.items():
-                lines.append(f"- {file}")
-                for e in errors:
-                    lines.append(f"  * {e}")
-            msg = "\\n".join(lines)
-            self.log("[ERROR] " + msg)
-            QMessageBox.critical(self, "音频处理失败", msg)
-        except Exception as exc:
-            self.show_error("生成 txt/XML 失败", exc)
+        )
+
+    def on_prepare_invalid_audio(self, exc: InvalidAudioError):
+        self.set_generate_progress(0, self.txt("音频处理失败", "Audio processing failed"))
+        lines = [self.txt("存在无法规范化或不符合要求的音频：", "Some audio files cannot be normalized or are invalid:")]
+        for file, errors in exc.invalid_files.items():
+            lines.append(f"- {file}")
+            for e in errors:
+                lines.append(f"  * {e}")
+        msg = "\n".join(lines)
+        self.log("[ERROR] " + msg)
+        QMessageBox.critical(self, self.txt("音频处理失败", "Audio processing failed"), msg)
+
+    def on_prepare_failed(self, exc: Exception):
+        self.set_generate_progress(0, self.txt("生成失败", "Generation failed"))
+        self.show_error(self.txt("生成失败", "Generation failed"), exc)
 
     def save_segments_and_write_xml(self):
+        """Save marker settings and rewrite XML only.
+
+        This button used to call the full Generate pipeline, which re-ran
+        normalization, mapping, fmod_ready_wav creation and loudness matching.
+        That was correct but extremely slow.  It is now an XML-only operation.
+        """
+        if self.is_generating:
+            QMessageBox.information(
+                self,
+                self.txt("正在生成", "Generating"),
+                self.txt("当前正在生成，请等待完成。", "Generation is already running. Please wait."),
+            )
+            return
+
+        xml, music, station = self.xml_path(), self.music_dir(), self.station_combo.currentData()
+        if not xml:
+            QMessageBox.warning(self, self.txt("缺少 XML", "Missing XML"), self.txt("请先选择 RadioInfo_CN.xml", "Please select RadioInfo_CN.xml first"))
+            return
+        if not music:
+            QMessageBox.warning(self, self.txt("缺少音乐文件夹", "Missing music folder"), self.txt("请先选择音乐文件夹", "Please select a music folder first"))
+            return
+        if not station:
+            QMessageBox.warning(self, self.txt("缺少电台", "Missing station"), self.txt("请先选择目标电台", "Please select a target station first"))
+            return
+
         self.save_current_segments()
-        self.run_prepare()
+
+        try:
+            self.log(self.txt("[INFO] 正在保存段落设置并更新 XML。", "[INFO] Saving markers and updating XML."))
+            result = regenerate_xml_only(xml, music, station)
+            self.log(self.txt(f"[OK] 已重写 XML: {result.output_xml}", f"[OK] XML saved: {result.output_xml}"))
+            self.log(self.txt(f"  更新槽位: {result.changed_slots}", f"  Updated slots: {result.changed_slots}"))
+            QMessageBox.information(
+                self,
+                self.txt("XML 已保存", "XML saved"),
+                self.txt(
+                    f"段落设置已保存，XML 已更新。\n\n输出 XML：{result.output_xml}",
+                    f"Markers saved and XML updated.\n\nOutput XML: {result.output_xml}",
+                )
+            )
+        except Exception as exc:
+            self.show_error(self.txt("重写 XML 失败", "Failed to rewrite XML"), exc)
 
     def refresh_calibration_audio_list(self):
         folder = self.music_dir()

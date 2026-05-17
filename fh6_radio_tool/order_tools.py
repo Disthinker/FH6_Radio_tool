@@ -654,6 +654,7 @@ def create_fmod_rebuild_workspace(
     extract_template_dir: Path,
     rows: list[TrackOrderRow],
     audio_by_filename: dict[str, AudioInfo],
+    progress_callback=None,
 ) -> Path:
     """生成用户无感的 Fmod Rebuild 输入，并自动匹配音量。"""
     output_dir = Path(output_dir)
@@ -674,6 +675,9 @@ def create_fmod_rebuild_workspace(
     build_dir.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
+    if progress_callback:
+        progress_callback(60, "Copying original FMOD Extract template...")
+
     if extract_template_dir and Path(extract_template_dir).exists():
         shutil.copytree(extract_template_dir, ready_wav_dir)
     else:
@@ -681,6 +685,12 @@ def create_fmod_rebuild_workspace(
 
     replaced_count = 0
     volume_rows: list[dict[str, object]] = []
+    active_rows = [
+        row for row in rows
+        if row.audio_filename and row.original_wav_relpath and audio_by_filename.get(row.audio_filename)
+    ]
+    total_active = max(1, len(active_rows))
+    processed_active = 0
 
     for row in rows:
         if not row.audio_filename or not row.original_wav_relpath:
@@ -695,6 +705,16 @@ def create_fmod_rebuild_workspace(
 
         dst = ready_wav_dir / row.original_wav_relpath
         reference = dst
+
+        processed_active += 1
+        if progress_callback:
+            base = 62
+            span = 30
+            pct = base + int(span * min(processed_active, total_active) / total_active)
+            progress_callback(
+                pct,
+                f"Replacing and loudness matching {processed_active}/{total_active}: {row.audio_filename}",
+            )
 
         if not reference.exists():
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -730,6 +750,9 @@ def create_fmod_rebuild_workspace(
         })
         replaced_count += 1
 
+    if progress_callback:
+        progress_callback(93, "Writing loudness report...")
+
     volume_report = output_dir.parent / "work" / "volume_match_report.csv"
     volume_report.parent.mkdir(parents=True, exist_ok=True)
     with volume_report.open("w", encoding="utf-8-sig", newline="") as f:
@@ -748,6 +771,9 @@ def create_fmod_rebuild_workspace(
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(volume_rows)
+
+    if progress_callback:
+        progress_callback(95, "Writing rebuild instructions...")
 
     user_readme = output_dir.parent / "work" / "READ_ME_REBUILD_BANK.txt"
     user_readme.write_text(
