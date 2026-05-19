@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import csv
 import json
 import shutil
 import sys
@@ -44,6 +45,7 @@ from .fmod_automation import (
     prepare_extract_job, prepare_rebuild_job,
 )
 from .v2_state_store import APP_VERSION, StateStore, TrackProfile
+from .marker_import_tools import MarkerImportRow, normalize_match_text, read_marker_import_file, write_marker_import_template, IMPORT_COLUMNS
 from .wav_preview_player import WavPreviewPlayer
 from .wav_tools import list_audio_candidates, natural_key, read_wav_info, validate_wav
 from .xml_tools import find_station, list_station_infos, parse_xml, station_info_from_node, write_xml
@@ -157,6 +159,7 @@ class MainWindow(QMainWindow):
         self.current_xml: Path | None = None
         self.station_infos = []
         self.audio_paths: list[Path] = []
+        self._populating_music_table = False
         self.loop_candidates = []
         self.current_loop_audio: Path | None = None
         self.xml_candidates: list[Path] = []
@@ -221,8 +224,8 @@ class MainWindow(QMainWindow):
         self.slot_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.slot_table.horizontalHeader().sectionClicked.connect(self.on_slot_header_clicked)
 
-        self.music_table = QTableWidget(0, 7)
-        self.music_table.setHorizontalHeaderLabels(["选择\n全选", "文件名", "格式", "采样率", "时长", "已保存设置", "路径"])
+        self.music_table = QTableWidget(0, 8)
+        self.music_table.setHorizontalHeaderLabels(["选择\n全选", "文件名", "Artist", "格式", "采样率", "时长", "已保存设置", "路径"])
         self.music_table.horizontalHeader().setStretchLastSection(True)
         self.music_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.music_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -242,7 +245,7 @@ class MainWindow(QMainWindow):
         self.preview_scenario_combo.addItem("漫游模式：Track Loop 循环", "roam_loop")
         self.preview_scenario_combo.addItem("比赛开始：TrackDrop/TrackStart → TrackLoop", "race_start")
         self.preview_scenario_combo.addItem("比赛进行：TrackLoop 循环", "race_loop")
-        self.preview_scenario_combo.addItem("冲线：TrackLoopEnd 前后 → PostDrop", "finish")
+        self.preview_scenario_combo.addItem("冲线：PostDrop 前后预览", "finish")
         self.preview_scenario_combo.addItem("冲线后：PostRaceLoop 循环", "post_loop")
         self.seek_slider = QSlider(Qt.Horizontal)
         self.seek_slider.setRange(0, 0)
@@ -279,10 +282,10 @@ class MainWindow(QMainWindow):
         self.step_title_label = QLabel()
         self.step_title_label.setObjectName("StepTitle")
         self.btn_prev_step = QPushButton("上一步")
-        self.btn_prev_step.setFixedWidth(90)
+        self.btn_prev_step.setMinimumWidth(96)
         self.btn_prev_step.clicked.connect(self.go_prev_step)
         self.btn_next_step = QPushButton("下一步")
-        self.btn_next_step.setFixedWidth(90)
+        self.btn_next_step.setMinimumWidth(96)
         self.btn_next_step.setObjectName("PrimaryAction")
         self.btn_next_step.clicked.connect(self.go_next_step)
         nav.addWidget(self.step_title_label)
@@ -345,6 +348,7 @@ class MainWindow(QMainWindow):
 
         self.station_combo.currentIndexChanged.connect(self.reload_slots)
         self.music_table.itemSelectionChanged.connect(self.on_music_selection_changed)
+        self.music_table.itemChanged.connect(self.on_music_table_item_changed)
         self.loop_audio_combo.currentIndexChanged.connect(self.on_loop_audio_changed)
         self.candidate_combo.currentIndexChanged.connect(self.on_candidate_combo_changed)
         self.candidate_table.itemSelectionChanged.connect(self.on_candidate_table_selection_changed)
@@ -396,7 +400,7 @@ class MainWindow(QMainWindow):
         self.btn_restore.setObjectName("DangerAction")
         self.btn_restore.clicked.connect(self.restore_from_manifest)
         for b in (self.btn_game, self.btn_music, self.btn_backup, self.btn_restore):
-            b.setFixedWidth(132)
+            b.setMinimumWidth(144)
 
         self.lbl_game_root = QLabel("游戏根目录")
         self.lbl_music_dir = QLabel("音乐目录")
@@ -428,7 +432,7 @@ class MainWindow(QMainWindow):
         lang_row.addWidget(self.game_language_combo)
         lang_row.addStretch(1)
         self.btn_hide_setup = QPushButton("完成设置并隐藏")
-        self.btn_hide_setup.setFixedWidth(130)
+        self.btn_hide_setup.setMinimumWidth(150)
         self.btn_hide_setup.clicked.connect(lambda: (self.path_box.setVisible(False), self.update_setup_toggle_text()))
         lang_row.addWidget(self.btn_hide_setup)
         grid.addLayout(lang_row, 3, 0, 1, 4)
@@ -537,11 +541,11 @@ class MainWindow(QMainWindow):
         station_bar.addWidget(self.station_combo)
         station_bar.addStretch(1)
         self.btn_assign = QPushButton("应用选择替换")
-        self.btn_assign.setFixedWidth(132)
+        self.btn_assign.setMinimumWidth(150)
         self.btn_assign.setObjectName("PrimaryAction")
         self.btn_assign.clicked.connect(self.assign_checked_or_current_music_to_slots)
         self.btn_clear_assignment = QPushButton("取消已选替换")
-        self.btn_clear_assignment.setFixedWidth(132)
+        self.btn_clear_assignment.setMinimumWidth(150)
         self.btn_clear_assignment.setObjectName("SmallAction")
         self.btn_clear_assignment.clicked.connect(self.clear_selected_assignment)
         station_bar.addWidget(self.btn_assign)
@@ -611,76 +615,62 @@ class MainWindow(QMainWindow):
         outer.addWidget(top_box)
 
         candidate_box = QGroupBox("Loop 候选与场景试听")
-        candidate_v = QVBoxLayout(candidate_box)
-        candidate_v.setContentsMargins(12, 10, 12, 10)
-        candidate_v.setSpacing(8)
+        candidate_grid = QGridLayout(candidate_box)
+        candidate_grid.setContentsMargins(12, 10, 12, 10)
+        candidate_grid.setHorizontalSpacing(8)
+        candidate_grid.setVerticalSpacing(8)
+        candidate_grid.setColumnStretch(2, 1)
 
-        # Row 1: analyze + candidate selection + candidate preview.  Use fixed
-        # label/button widths so the controls line up instead of stretching
-        # unpredictably on wide screens.
-        candidate_row = QHBoxLayout()
-        candidate_row.setSpacing(8)
         self.btn_analyze_loop = QPushButton("分析 Loop")
-        self.btn_analyze_loop.setFixedSize(110, 34)
+        self.btn_analyze_loop.setMinimumWidth(110)
         self.btn_analyze_loop.setObjectName("PrimaryAction")
         self.btn_analyze_loop.clicked.connect(self.analyze_current_loop_audio)
+
         self.lbl_candidate = QLabel("候选段落")
-        self.lbl_candidate.setFixedWidth(70)
         self.lbl_candidate.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.lbl_preview_seconds = QLabel("试听秒数")
-        self.lbl_preview_seconds.setFixedWidth(70)
         self.lbl_preview_seconds.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.preview_seconds_spin.setFixedWidth(72)
         self.btn_preview_candidate = QPushButton("试听候选")
-        self.btn_preview_candidate.setFixedSize(100, 34)
+        self.btn_preview_candidate.setMinimumWidth(110)
         self.btn_preview_candidate.clicked.connect(self.preview_selected_candidate)
-        candidate_row.addWidget(self.btn_analyze_loop)
-        candidate_row.addWidget(self.lbl_candidate)
-        candidate_row.addWidget(self.candidate_combo, 1)
-        candidate_row.addWidget(self.lbl_preview_seconds)
-        candidate_row.addWidget(self.preview_seconds_spin)
-        candidate_row.addWidget(self.btn_preview_candidate)
-        candidate_v.addLayout(candidate_row)
 
-        # Row 2: scene preview.  Keep the left label aligned with the candidate
-        # label above, and keep the preview button the same size.
-        scene_row = QHBoxLayout()
-        scene_row.setSpacing(8)
-        self.scene_row_spacer = QWidget()
-        self.scene_row_spacer.setFixedWidth(110)
+        candidate_grid.addWidget(self.btn_analyze_loop, 0, 0)
+        candidate_grid.addWidget(self.lbl_candidate, 0, 1)
+        candidate_grid.addWidget(self.candidate_combo, 0, 2, 1, 4)
+        candidate_grid.addWidget(self.lbl_preview_seconds, 0, 6)
+        candidate_grid.addWidget(self.preview_seconds_spin, 0, 7)
+        candidate_grid.addWidget(self.btn_preview_candidate, 0, 8)
+
         self.lbl_preview_scene = QLabel("场景试听")
-        self.lbl_preview_scene.setFixedWidth(70)
         self.lbl_preview_scene.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.btn_preview_scene = QPushButton("试听场景")
-        self.btn_preview_scene.setFixedSize(100, 34)
+        self.btn_preview_scene.setMinimumWidth(110)
         self.btn_preview_scene.clicked.connect(self.preview_selected_scenario)
-        scene_row.addWidget(self.scene_row_spacer)
-        scene_row.addWidget(self.lbl_preview_scene)
-        scene_row.addWidget(self.preview_scenario_combo, 1)
-        scene_row.addSpacing(150)
-        scene_row.addWidget(self.btn_preview_scene)
-        candidate_v.addLayout(scene_row)
+        candidate_grid.addWidget(self.lbl_preview_scene, 1, 1)
+        candidate_grid.addWidget(self.preview_scenario_combo, 1, 2, 1, 6)
+        candidate_grid.addWidget(self.btn_preview_scene, 1, 8)
 
         self.candidate_summary_label.setWordWrap(True)
         self.candidate_summary_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        candidate_v.addWidget(self.candidate_summary_label)
+        candidate_grid.addWidget(self.candidate_summary_label, 2, 2, 1, 7)
 
-        apply_row = QHBoxLayout()
-        apply_row.setSpacing(8)
         self.btn_apply_track = QPushButton("填入 Track Loop")
-        self.btn_apply_track.setFixedSize(142, 32)
+        self.btn_apply_track.setMinimumWidth(145)
         self.btn_apply_track.clicked.connect(lambda: self.apply_selected_candidate("track"))
         self.btn_apply_post = QPushButton("填入 Post Loop")
-        self.btn_apply_post.setFixedSize(142, 32)
+        self.btn_apply_post.setMinimumWidth(145)
         self.btn_apply_post.clicked.connect(lambda: self.apply_selected_candidate("post"))
         self.btn_apply_both = QPushButton("同时填入 Track/Post")
-        self.btn_apply_both.setFixedSize(170, 32)
+        self.btn_apply_both.setMinimumWidth(180)
         self.btn_apply_both.clicked.connect(lambda: self.apply_selected_candidate("both"))
-        apply_row.addStretch(1)
-        apply_row.addWidget(self.btn_apply_track)
-        apply_row.addWidget(self.btn_apply_post)
-        apply_row.addWidget(self.btn_apply_both)
-        candidate_v.addLayout(apply_row)
+        apply_wrap = QHBoxLayout()
+        apply_wrap.setSpacing(8)
+        apply_wrap.addStretch(1)
+        apply_wrap.addWidget(self.btn_apply_track)
+        apply_wrap.addWidget(self.btn_apply_post)
+        apply_wrap.addWidget(self.btn_apply_both)
+        candidate_grid.addLayout(apply_wrap, 3, 2, 1, 7)
         outer.addWidget(candidate_box)
 
         seek_box = QGroupBox("进度条试听与手动微调")
@@ -691,10 +681,10 @@ class MainWindow(QMainWindow):
         playback_row.addWidget(self.position_label)
         playback_row.addStretch(1)
         self.btn_play_pause = QPushButton("播放 / 继续")
-        self.btn_play_pause.setFixedWidth(110)
+        self.btn_play_pause.setMinimumWidth(125)
         self.btn_play_pause.clicked.connect(lambda: self.player.play())
         self.btn_stop = QPushButton("停止")
-        self.btn_stop.setFixedWidth(80)
+        self.btn_stop.setMinimumWidth(80)
         self.btn_stop.clicked.connect(lambda: self.player.stop())
         playback_row.addWidget(self.btn_play_pause)
         playback_row.addWidget(self.btn_stop)
@@ -720,18 +710,45 @@ class MainWindow(QMainWindow):
         outer.addWidget(seek_box)
 
         marker_box = QGroupBox("Marker 参数")
-        grid = QGridLayout(marker_box)
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(6)
-        for idx, name in enumerate(MARKER_ORDER):
-            spin = QSpinBox()
-            spin.setRange(-1, 2_147_483_647)
-            spin.setValue(-1)
-            self.marker_spins[name] = spin
-            row = idx // 3
-            col = (idx % 3) * 2
-            grid.addWidget(QLabel(name), row, col)
-            grid.addWidget(spin, row, col + 1)
+        marker_outer = QVBoxLayout(marker_box)
+        marker_outer.setContentsMargins(10, 8, 10, 8)
+        marker_outer.setSpacing(7)
+
+        marker_rows = [
+            ["TrackStart", "TrackDrop", "PostDrop"],
+            ["TrackLoopStart", "TrackLoopEnd"],
+            ["PostRaceLoopStart", "PostRaceLoopEnd"],
+            ["DJSegment", "StingerStart", "DJStart"],
+            ["End"],
+        ]
+        for names in marker_rows:
+            row_layout = QHBoxLayout()
+            row_layout.setSpacing(6)
+            for name in names:
+                label = QLabel(name)
+                label.setMinimumWidth(125)
+                label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                spin = QSpinBox()
+                spin.setRange(-1, 2_147_483_647)
+                spin.setValue(-1)
+                spin.setMinimumWidth(135)
+                spin.setMaximumWidth(170)
+                self.marker_spins[name] = spin
+                row_layout.addWidget(label)
+                row_layout.addWidget(spin)
+                row_layout.addSpacing(12)
+            row_layout.addStretch(1)
+            marker_outer.addLayout(row_layout)
+
+        marker_import_row = QHBoxLayout()
+        self.btn_import_markers = QPushButton("批量导入 Marker")
+        self.btn_import_markers.clicked.connect(self.import_marker_profiles_from_file)
+        self.btn_export_marker_template = QPushButton("导出 Marker")
+        self.btn_export_marker_template.clicked.connect(self.export_marker_import_template_dialog)
+        marker_import_row.addStretch(1)
+        marker_import_row.addWidget(self.btn_import_markers)
+        marker_import_row.addWidget(self.btn_export_marker_template)
+        marker_outer.addLayout(marker_import_row)
         outer.addWidget(marker_box)
 
         bottom = QHBoxLayout()
@@ -759,14 +776,14 @@ class MainWindow(QMainWindow):
         grid.setVerticalSpacing(8)
         grid.setColumnStretch(1, 1)
         self.btn_fmod_tool = QPushButton("选择 Fmod Bank Tools")
-        self.btn_fmod_tool.setFixedWidth(170)
+        self.btn_fmod_tool.setMinimumWidth(190)
         self.btn_fmod_tool.clicked.connect(self.browse_fmod_tool)
         self.btn_package = QPushButton("仅生成 Mod 输出包")
-        self.btn_package.setFixedWidth(190)
+        self.btn_package.setMinimumWidth(210)
         self.btn_package.setObjectName("PrimaryAction")
         self.btn_package.clicked.connect(self.generate_mod_output_package)
         self.btn_one_click = QPushButton("一键替换到游戏")
-        self.btn_one_click.setFixedWidth(190)
+        self.btn_one_click.setMinimumWidth(210)
         self.btn_one_click.setObjectName("DangerAction")
         self.btn_one_click.clicked.connect(self.one_click_replace_game_files)
 
@@ -882,11 +899,39 @@ class MainWindow(QMainWindow):
             'btn_jump_marker': ("Jump to Marker", "跳到 Marker"),
             'btn_write_marker': ("Write current point", "当前点写入 Marker"),
             'btn_save_loop_profile': ("Save audio settings", "保存当前音频设置"),
+            'btn_import_markers': ("Import markers", "批量导入 Marker"),
+            'btn_export_marker_template': ("Export markers", "导出 Marker"),
         }
         for attr, (en_text, zh_text) in buttons.items():
             obj = getattr(self, attr, None)
             if obj is not None:
                 obj.setText(en_text if en else zh_text)
+        if hasattr(self, 'preview_scenario_combo'):
+            current = self.preview_scenario_combo.currentData()
+            self.preview_scenario_combo.blockSignals(True)
+            self.preview_scenario_combo.clear()
+            if en:
+                scenarios = [
+                    ("Free roam: Track Loop", "roam_loop"),
+                    ("Race start: TrackDrop/TrackStart to TrackLoop", "race_start"),
+                    ("Race loop: TrackLoop", "race_loop"),
+                    ("Finish: preview around PostDrop", "finish"),
+                    ("Post-race: PostRaceLoop", "post_loop"),
+                ]
+            else:
+                scenarios = [
+                    ("漫游模式：Track Loop 循环", "roam_loop"),
+                    ("比赛开始：TrackDrop/TrackStart → TrackLoop", "race_start"),
+                    ("比赛进行：TrackLoop 循环", "race_loop"),
+                    ("冲线：PostDrop 前后预览", "finish"),
+                    ("冲线后：PostRaceLoop 循环", "post_loop"),
+                ]
+            for text, data in scenarios:
+                self.preview_scenario_combo.addItem(text, data)
+            idx = self.preview_scenario_combo.findData(current)
+            self.preview_scenario_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            self.preview_scenario_combo.blockSignals(False)
+
         if hasattr(self, 'guide_box'):
             self.guide_box.setTitle("Quick Guide / 快速教程" if en else "快速教程 / Quick Guide")
         if hasattr(self, 'log_runtime_box'):
@@ -904,9 +949,9 @@ class MainWindow(QMainWindow):
             ["替换\n全选", "Slot", "原曲名", "Artist", "SoundName", "SampleLength", "SampleRate", "已分配新曲", "Markers", "状态"]
         )
         self.music_table.setHorizontalHeaderLabels(
-            ["Select\nAll", "File name", "Format", "Sample rate", "Duration", "Saved settings", "Path"]
+            ["Select\nAll", "File name", "Artist", "Format", "Sample rate", "Duration", "Saved settings", "Path"]
             if en else
-            ["选择\n全选", "文件名", "格式", "采样率", "时长", "已保存设置", "路径"]
+            ["选择\n全选", "文件名", "Artist", "格式", "采样率", "时长", "已保存设置", "路径"]
         )
         self.apply_table_layout()
         if hasattr(self, 'assign_hint'):
@@ -1242,7 +1287,8 @@ class MainWindow(QMainWindow):
                         has_profile = True
                 except Exception as exc:
                     dur = f"读取失败: {exc}"
-                rows.append((path, key, fmt, sr, dur, has_profile))
+                artist_text = (profile.artist if profile and profile.artist else guess_display_artist_from_filename(path.name)[1])
+                rows.append((path, key, fmt, sr, dur, has_profile, artist_text))
                 if report and (i % max(1, total // 20) == 0 or i + 1 == total):
                     report(5 + int(90 * (i + 1) / total), f"[MUSIC] 读取音频信息 {i + 1}/{total}: {path.name}")
             store.set_setting("music_dir", str(folder))
@@ -1253,16 +1299,21 @@ class MainWindow(QMainWindow):
         def populate(result):
             audio_paths, rows = result
             self.audio_paths = list(audio_paths)
+            self._populating_music_table = True
             self.music_table.setRowCount(len(rows))
-            for i, (path, key, fmt, sr, dur, has_profile) in enumerate(rows):
+            for i, (path, key, fmt, sr, dur, has_profile, artist_text) in enumerate(rows):
                 set_check_item(self.music_table, i, 0, False, data=key)
                 set_item(self.music_table, i, 1, path.name, data=key)
-                set_item(self.music_table, i, 2, fmt)
-                set_item(self.music_table, i, 3, sr)
-                set_item(self.music_table, i, 4, dur)
-                set_item(self.music_table, i, 5, "是" if has_profile else "否")
-                set_item(self.music_table, i, 6, str(path))
+                artist_item = QTableWidgetItem(str(artist_text or ""))
+                artist_item.setData(Qt.UserRole, key)
+                self.music_table.setItem(i, 2, artist_item)
+                set_item(self.music_table, i, 3, fmt)
+                set_item(self.music_table, i, 4, sr)
+                set_item(self.music_table, i, 5, dur)
+                set_item(self.music_table, i, 6, "是" if has_profile else "否")
+                set_item(self.music_table, i, 7, str(path))
                 self.loop_audio_combo.addItem(path.name, str(path))
+            self._populating_music_table = False
             self.store.set_setting("music_dir", str(folder))
             if not quiet:
                 self.log(f"[OK] 音乐扫描完成: {len(self.audio_paths)} 首")
@@ -1287,11 +1338,13 @@ class MainWindow(QMainWindow):
             self.slot_table.setColumnWidth(5, 105)
             self.slot_table.setColumnWidth(6, 85)
             self.music_table.setColumnWidth(0, 54)
-            self.music_table.setColumnWidth(1, 150)
-            self.music_table.setColumnWidth(2, 70)
-            self.music_table.setColumnWidth(3, 82)
+            self.music_table.setColumnWidth(1, 170)
+            self.music_table.setColumnWidth(2, 115)
+            self.music_table.setColumnWidth(3, 70)
             self.music_table.setColumnWidth(4, 82)
-            self.music_table.setColumnWidth(5, 92)
+            self.music_table.setColumnWidth(5, 82)
+            self.music_table.setColumnWidth(6, 92)
+            self.music_table.setColumnWidth(7, 220)
             self.slot_table.verticalHeader().setDefaultSectionSize(30)
             self.music_table.verticalHeader().setDefaultSectionSize(30)
             self.slot_table.horizontalHeader().setDefaultAlignment(Qt.AlignCenter)
@@ -1366,7 +1419,7 @@ class MainWindow(QMainWindow):
         return slot, sound, old_name, old_artist
 
     def music_path_and_key_from_row(self, row: int) -> tuple[Path, str]:
-        path_item = self.music_table.item(row, 6)
+        path_item = self.music_table.item(row, 7)
         key_item = self.music_table.item(row, 1) or self.music_table.item(row, 0)
         if not path_item or not key_item:
             raise ValueError(f"无效音乐行: {row}")
@@ -1385,7 +1438,7 @@ class MainWindow(QMainWindow):
         row = self.music_table.currentRow()
         if row < 0:
             return None
-        path_item = self.music_table.item(row, 6)
+        path_item = self.music_table.item(row, 7)
         key_item = self.music_table.item(row, 1) or self.music_table.item(row, 0)
         if not path_item or not key_item:
             return None
@@ -1481,6 +1534,27 @@ class MainWindow(QMainWindow):
         idx = self.loop_audio_combo.findData(str(path))
         if idx >= 0:
             self.loop_audio_combo.setCurrentIndex(idx)
+
+    def on_music_table_item_changed(self, item: QTableWidgetItem):
+        """Persist the editable Artist column from the user's music list."""
+        if self._populating_music_table or item is None or item.column() != 2:
+            return
+        try:
+            row = item.row()
+            key_item = self.music_table.item(row, 1) or self.music_table.item(row, 0)
+            path_item = self.music_table.item(row, 7)
+            if not key_item or not path_item:
+                return
+            key = str(key_item.data(Qt.UserRole))
+            path = Path(path_item.text())
+            profile = self.store.load_track_profile(key)
+            display, guessed_artist = guess_display_artist_from_filename(path.name)
+            if not profile:
+                profile = TrackProfile(key, str(path), path.name, display, guessed_artist)
+            profile = replace(profile, source_path=str(path), filename=path.name, artist=item.text().strip())
+            self.store.save_track_profile(profile)
+        except Exception as exc:
+            self.log(f"[WARN] 保存 Artist 失败: {exc}")
 
     def on_loop_audio_changed(self):
         text = self.loop_audio_combo.currentData()
@@ -1735,6 +1809,132 @@ class MainWindow(QMainWindow):
             self.reload_slots()
         except Exception as exc:
             self.show_error("保存音频设置失败", exc)
+
+
+    def _find_audio_path_for_marker_row(self, row: MarkerImportRow, sample_length_index: dict[int, list[Path]]) -> Path | None:
+        """Match an import row to a scanned audio file.
+
+        Matching priority:
+        1) Filename / MatchName / DisplayName against current music file stem.
+        2) SampleLength when it uniquely identifies one scanned WAV file.
+        """
+        if not self.audio_paths:
+            return None
+        name_keys = [row.filename, row.match_name, row.display_name]
+        normalized_to_path: dict[str, Path] = {}
+        for path in self.audio_paths:
+            normalized_to_path.setdefault(normalize_match_text(path.name), path)
+            normalized_to_path.setdefault(normalize_match_text(path.stem), path)
+        for key in name_keys:
+            norm = normalize_match_text(key)
+            if norm and norm in normalized_to_path:
+                return normalized_to_path[norm]
+        if row.sample_length > 0:
+            matches = sample_length_index.get(int(row.sample_length), [])
+            if len(matches) == 1:
+                return matches[0]
+        return None
+
+    def _build_sample_length_index(self) -> dict[int, list[Path]]:
+        index: dict[int, list[Path]] = {}
+        for path in self.audio_paths:
+            try:
+                if path.suffix.lower() in (".wav", ".wave"):
+                    info = read_wav_info(path)
+                    index.setdefault(int(info.sample_length), []).append(path)
+            except Exception:
+                continue
+        return index
+
+    def import_marker_profiles_from_file(self) -> None:
+        if not self.audio_paths:
+            QMessageBox.warning(self, "缺少音乐", "请先选择并扫描音乐目录，然后再导入 Marker 参数。")
+            return
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "导入 Marker 参数文件",
+            str(project_work_dir()),
+            "Marker import (*.csv *.json);;CSV (*.csv);;JSON (*.json);;All files (*.*)",
+        )
+        if not file_path:
+            return
+        try:
+            rows = read_marker_import_file(Path(file_path))
+            sample_index = self._build_sample_length_index()
+            imported = 0
+            unmatched: list[str] = []
+            for row in rows:
+                path = self._find_audio_path_for_marker_row(row, sample_index)
+                if path is None:
+                    unmatched.append(row.match_name or row.display_name or row.filename or f"row {row.source_row}")
+                    continue
+                key = track_key_for_path(path)
+                old = self.store.load_track_profile(key)
+                try:
+                    info = read_wav_info(path) if path.suffix.lower() in (".wav", ".wave") else None
+                except Exception:
+                    info = None
+                display, artist = guess_display_artist_from_filename(path.name)
+                profile = old or TrackProfile(key, str(path), path.name, display, artist)
+                profile = replace(
+                    profile,
+                    source_path=str(path),
+                    filename=path.name,
+                    display_name=row.display_name or profile.display_name or display,
+                    artist=row.artist or profile.artist or artist,
+                    sample_rate=info.samplerate if info else (row.sample_rate or profile.sample_rate),
+                    sample_length=info.sample_length if info else (row.sample_length or profile.sample_length),
+                    markers={name: int(row.markers.get(name, -1)) for name in MARKER_ORDER},
+                    notes=(profile.notes + "\n" if profile.notes else "") + f"Imported markers from {Path(file_path).name}, row {row.source_row}",
+                )
+                self.store.save_track_profile(profile)
+                self._sync_profile_to_segments_json(profile)
+                imported += 1
+            self.scan_music_dir(quiet=True)
+            self.reload_slots()
+            if self.current_loop_audio:
+                self.on_loop_audio_changed()
+            msg = f"已导入 {imported} 首音乐的 Marker 参数。"
+            if unmatched:
+                msg += f"\n未匹配 {len(unmatched)} 行：" + ", ".join(unmatched[:12])
+                if len(unmatched) > 12:
+                    msg += " ..."
+            self.log("[OK] " + msg.replace("\n", " | "))
+            QMessageBox.information(self, "导入完成", msg)
+        except Exception as exc:
+            self.show_error("导入 Marker 参数失败", exc)
+
+    def export_marker_import_template_dialog(self) -> None:
+        default = project_output_dir() / "marker_export.csv"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出 Marker",
+            str(default),
+            "CSV (*.csv)",
+        )
+        if not file_path:
+            return
+        try:
+            rows = []
+            for path in self.audio_paths:
+                row = {col: "" for col in IMPORT_COLUMNS}
+                row["MatchName"] = path.stem
+                row["Filename"] = path.name
+                row["DisplayName"] = path.stem
+                try:
+                    if path.suffix.lower() in (".wav", ".wave"):
+                        info = read_wav_info(path)
+                        row["SampleRate"] = info.samplerate
+                        row["SampleLength"] = info.sample_length
+                        row["TrackStart"] = 0
+                        row["End"] = max(0, info.sample_length - 1)
+                except Exception:
+                    pass
+                rows.append(row)
+            write_marker_import_template(Path(file_path), rows)
+            QMessageBox.information(self, "已导出 Marker", f"已导出 Marker：\n{file_path}")
+        except Exception as exc:
+            self.show_error("导出 Marker 失败", exc)
 
     def _sync_profile_to_segments_json(self, profile: TrackProfile):
         # Compatibility sidecar for existing v1 XML generation path.

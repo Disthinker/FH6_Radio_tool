@@ -626,11 +626,24 @@ def prepare_extract_job(
 def prepare_rebuild_job(exe_path: Path, wav_workspace: Path, manifest_path: Path, *, clean_wav_dir: bool = True) -> FmodAutomationResult:
     layout = layout_from_exe(exe_path)
     write_config_ini(layout)
-    # Clean previous build output so deploy never uses stale .bank files.
-    _clean_directory(layout.rebuild_dir)
+    # Clean previous build output so deploy never uses stale .bank files.  Use
+    # retry + verification because Windows may keep files locked when the user
+    # left Fmod Bank Tools open from a previous run.
+    leftovers = _clean_directory_with_retry(layout.rebuild_dir)
+    if leftovers:
+        names = ", ".join(p.name for p in leftovers)
+        raise RuntimeError(
+            "无法清理 Fmod Bank Tools build 目录中的旧输出文件：" + names +
+            "。请关闭所有 Fmod Bank Tools 窗口后重试，避免一键替换误判旧 bank。"
+        )
     wav_dir = import_wav_workspace_to_tool(wav_workspace, layout, clean_wav_dir=clean_wav_dir)
-    manifest = write_manifest(manifest_path, "rebuild", layout, {"wav_workspace": str(wav_workspace), "tool_wav_dir": str(wav_dir)})
-    return FmodAutomationResult(True, "rebuild_prepare", f"已准备 Rebuild wav 工作区：{wav_dir}", layout, manifest, None, [wav_dir])
+    manifest = write_manifest(manifest_path, "rebuild", layout, {
+        "wav_workspace": str(wav_workspace),
+        "tool_wav_dir": str(wav_dir),
+        "rebuild_dir_cleaned": True,
+        "stale_build_files_blocked": [],
+    })
+    return FmodAutomationResult(True, "rebuild_prepare", f"已准备 Rebuild wav 工作区：{wav_dir}；旧 build 输出已清理。", layout, manifest, None, [wav_dir])
 
 
 def launch_and_optionally_trigger(exe_path: Path, action: str, *, auto_trigger: bool = True) -> FmodAutomationResult:
@@ -646,14 +659,37 @@ def launch_and_optionally_trigger(exe_path: Path, action: str, *, auto_trigger: 
 
 
 
-def _dir_signature(path: Path, patterns: tuple[str, ...]) -> tuple[int, int]:
-    """Return (file_count, total_size) for files matching patterns."""
+def _matching_files(path: Path, patterns: tuple[str, ...], *, recursive: bool = True) -> list[Path]:
+    """Return unique matching files in deterministic order."""
     path = Path(path)
     files: list[Path] = []
     if path.exists():
         for pat in patterns:
-            files.extend(x for x in path.rglob(pat) if x.is_file())
-    unique = sorted(set(files), key=lambda x: x.as_posix())
+            iterator = path.rglob(pat) if recursive else path.glob(pat)
+            files.extend(x for x in iterator if x.is_file())
+    return sorted(set(files), key=lambda x: x.as_posix().lower())
+
+
+def _file_snapshot(path: Path, patterns: tuple[str, ...], *, recursive: bool = True) -> dict[str, tuple[int, int]]:
+    """Return a lightweight name -> (size, mtime_ns) snapshot.
+
+    Rebuild detection must not be fooled by old bank files left from a previous
+    run.  Tracking mtime/size lets us tell whether the current Rebuild actually
+    created or updated a bank after we clicked the button.
+    """
+    snap: dict[str, tuple[int, int]] = {}
+    for f in _matching_files(path, patterns, recursive=recursive):
+        try:
+            st = f.stat()
+            snap[f.name.lower()] = (int(st.st_size), int(st.st_mtime_ns))
+        except OSError:
+            continue
+    return snap
+
+
+def _dir_signature(path: Path, patterns: tuple[str, ...]) -> tuple[int, int]:
+    """Return (file_count, total_size) for files matching patterns."""
+    unique = _matching_files(path, patterns)
     total = 0
     for f in unique:
         try:
@@ -661,6 +697,36 @@ def _dir_signature(path: Path, patterns: tuple[str, ...]) -> tuple[int, int]:
         except OSError:
             pass
     return len(unique), total
+
+
+def _files_changed_since_baseline(path: Path, patterns: tuple[str, ...], baseline: dict[str, tuple[int, int]] | None) -> set[str]:
+    if baseline is None:
+        return {p.name.lower() for p in _matching_files(path, patterns, recursive=False)}
+    changed: set[str] = set()
+    current = _file_snapshot(path, patterns, recursive=False)
+    for name, sig in current.items():
+        if baseline.get(name) != sig:
+            changed.add(name)
+    return changed
+
+
+def _clean_directory_with_retry(path: Path, *, keep_names: set[str] | None = None, retries: int = 5, delay_sec: float = 0.35) -> list[Path]:
+    """Clean a directory and return entries that could not be removed.
+
+    External Fmod Bank Tools may still be open from an earlier run.  On Windows,
+    locked files sometimes survive a single delete attempt.  Retrying and then
+    reporting leftovers prevents the one-click workflow from waiting on stale
+    build outputs.
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    keep_names = keep_names or set()
+    for _ in range(max(1, retries)):
+        _clean_directory(path, keep_names=keep_names)
+        leftovers = [p for p in path.iterdir() if p.name not in keep_names]
+        if not leftovers:
+            return []
+        time.sleep(delay_sec)
+    return [p for p in path.iterdir() if p.name not in keep_names]
 
 
 def _wait_until_stable(
@@ -673,40 +739,84 @@ def _wait_until_stable(
     poll_sec: float = 1.0,
     expected_names: set[str] | None = None,
     proc: subprocess.Popen | None = None,
+    baseline_snapshot: dict[str, tuple[int, int]] | None = None,
+    require_changed: bool = False,
+    allow_any_changed_bank: bool = False,
 ) -> tuple[bool, str]:
-    """Wait until a directory has enough matching files and file sizes stop changing."""
+    """Wait until a directory has enough matching files and file sizes stop changing.
+
+    ``require_changed`` prevents false positives from old files that were left in
+    the Fmod Bank Tools build directory.  This is important for repeated one-click
+    runs with the same bank name: the directory may already contain a bank from a
+    previous run, but the current Rebuild has not produced a fresh output yet.
+    """
     start = time.time()
     stable_since: float | None = None
     last_sig: tuple[int, int] | None = None
     expected_names = {n.lower() for n in expected_names or set()}
+    missing: list[str] = []
+    stale_expected: list[str] = []
 
     while time.time() - start < timeout_sec:
-        if proc is not None and proc.poll() is not None:
-            return False, f"外部 Fmod Bank Tools 已关闭或退出，退出码={proc.returncode}。已安全中止等待。"
+        found_files = _matching_files(path, patterns, recursive=False)
+        found = {p.name.lower() for p in found_files}
+        changed = _files_changed_since_baseline(path, patterns, baseline_snapshot)
+
         if expected_names:
-            found = {p.name.lower() for pat in patterns for p in Path(path).glob(pat) if p.is_file()} if Path(path).exists() else set()
-            enough = expected_names.issubset(found)
             missing = sorted(expected_names - found)
+            stale_expected = sorted(n for n in expected_names if n in found and require_changed and n not in changed)
+            enough = not missing and not stale_expected
+            # Fallback: some Fmod Bank Tools variants rebuild a valid bank but the
+            # name may differ from the input bank txt naming.  Do not hang forever
+            # if there is a fresh stable bank output; the deploy step will still
+            # verify exact names before overwriting the game.
+            if not enough and allow_any_changed_bank and changed:
+                enough = True
         else:
-            count, _ = _dir_signature(path, patterns)
+            count = len(found_files)
             enough = count >= min_count
-            missing = []
+            if require_changed:
+                enough = enough and bool(changed)
 
         sig = _dir_signature(path, patterns)
         if enough and sig == last_sig:
             if stable_since is None:
                 stable_since = time.time()
             if time.time() - stable_since >= stable_sec:
-                return True, f"目录输出已稳定：{path}，文件数={sig[0]}，总大小={sig[1]} bytes。"
+                detail = f"目录输出已稳定：{path}，文件数={sig[0]}，总大小={sig[1]} bytes。"
+                if changed:
+                    detail += " 本次更新文件：" + ", ".join(sorted(changed)) + "。"
+                if expected_names and not expected_names.issubset(found):
+                    detail += " 注意：期望文件名未全部出现，后续部署会继续做严格校验。"
+                return True, detail
         else:
             stable_since = None
             last_sig = sig
+
+        # Check external process after checking outputs.  Some users close the
+        # Fmod Bank Tools window immediately after it says Rebuild finished.  If
+        # the output is already stable, the success path above should win.
+        if proc is not None and proc.poll() is not None:
+            if found_files and (not require_changed or changed):
+                # Give the filesystem one last chance to settle before deciding.
+                time.sleep(min(1.0, poll_sec))
+                sig2 = _dir_signature(path, patterns)
+                if sig2 == sig:
+                    return True, f"外部 Fmod Bank Tools 已退出，但输出文件已稳定：{path}，文件数={sig2[0]}，总大小={sig2[1]} bytes。"
+            return False, f"外部 Fmod Bank Tools 已关闭或退出，退出码={proc.returncode}。已安全中止等待。"
         time.sleep(poll_sec)
 
     if expected_names:
-        return False, f"等待超时：{path} 未生成期望文件：{', '.join(missing) if missing else '文件未稳定'}。"
+        parts = []
+        if missing:
+            parts.append("缺少：" + ", ".join(missing))
+        if stale_expected:
+            parts.append("疑似旧文件未更新：" + ", ".join(stale_expected))
+        if not parts:
+            parts.append("文件未稳定")
+        return False, f"等待超时：{path} 未生成本次 Rebuild 的期望输出（{'；'.join(parts)}）。"
     sig = _dir_signature(path, patterns)
-    return False, f"等待超时：{path} 输出未稳定或文件数不足。当前文件数={sig[0]}。"
+    return False, f"等待超时：{path} 输出未稳定、文件数不足，或仅发现旧文件。当前文件数={sig[0]}。"
 
 
 def wait_for_extract_outputs(layout: FmodToolLayout, *, timeout_sec: int = 900, proc: subprocess.Popen | None = None) -> tuple[bool, str]:
@@ -724,11 +834,37 @@ def wait_for_extract_outputs(layout: FmodToolLayout, *, timeout_sec: int = 900, 
     return True, f"Extract 输出已就绪。{msg_txt} {msg_wav}"
 
 
-def wait_for_rebuild_outputs(layout: FmodToolLayout, expected_bank_names: Iterable[str] | None = None, *, timeout_sec: int = 1200, proc: subprocess.Popen | None = None) -> tuple[bool, str]:
+def wait_for_rebuild_outputs(
+    layout: FmodToolLayout,
+    expected_bank_names: Iterable[str] | None = None,
+    *,
+    timeout_sec: int = 1200,
+    proc: subprocess.Popen | None = None,
+    baseline_snapshot: dict[str, tuple[int, int]] | None = None,
+) -> tuple[bool, str]:
     names = {Path(x).name for x in (expected_bank_names or []) if str(x).strip()}
     if names:
-        return _wait_until_stable(layout.rebuild_dir, ("*.bank",), timeout_sec=timeout_sec, stable_sec=4.0, expected_names=names, proc=proc)
-    return _wait_until_stable(layout.rebuild_dir, ("*.bank",), min_count=1, timeout_sec=timeout_sec, stable_sec=4.0, proc=proc)
+        return _wait_until_stable(
+            layout.rebuild_dir,
+            ("*.bank",),
+            timeout_sec=timeout_sec,
+            stable_sec=4.0,
+            expected_names=names,
+            proc=proc,
+            baseline_snapshot=baseline_snapshot,
+            require_changed=True,
+            allow_any_changed_bank=True,
+        )
+    return _wait_until_stable(
+        layout.rebuild_dir,
+        ("*.bank",),
+        min_count=1,
+        timeout_sec=timeout_sec,
+        stable_sec=4.0,
+        proc=proc,
+        baseline_snapshot=baseline_snapshot,
+        require_changed=True,
+    )
 
 
 def launch_trigger_and_wait(exe_path: Path, action: str, *, auto_trigger: bool = True, expected_bank_names: Iterable[str] | None = None, timeout_sec: int | None = None) -> FmodAutomationResult:
@@ -753,8 +889,11 @@ def launch_trigger_and_wait(exe_path: Path, action: str, *, auto_trigger: bool =
                 None,
             )
 
+    rebuild_baseline = _file_snapshot(layout.rebuild_dir, ("*.bank",), recursive=False) if action_lower == "rebuild" else None
     proc = launch_tool(layout)
     message = f"已启动 Fmod Bank Tools，PID={proc.pid}。"
+    if action_lower == "rebuild":
+        message += f" Rebuild 基线文件数={len(rebuild_baseline or {})}。"
     trigger_ok = True
     if auto_trigger:
         trigger_ok, trig_msg = try_trigger_gui_action(proc.pid, action)
@@ -783,7 +922,7 @@ def launch_trigger_and_wait(exe_path: Path, action: str, *, auto_trigger: bool =
     if action_lower == "extract":
         wait_ok, wait_msg = wait_for_extract_outputs(layout, timeout_sec=timeout_sec or 900, proc=proc)
     elif action_lower == "rebuild":
-        wait_ok, wait_msg = wait_for_rebuild_outputs(layout, expected_bank_names, timeout_sec=timeout_sec or 1200, proc=proc)
+        wait_ok, wait_msg = wait_for_rebuild_outputs(layout, expected_bank_names, timeout_sec=timeout_sec or 1200, proc=proc, baseline_snapshot=rebuild_baseline)
     else:
         return FmodAutomationResult(False, action, message + f" 未知 action: {action}", layout, None, proc.pid, None)
 

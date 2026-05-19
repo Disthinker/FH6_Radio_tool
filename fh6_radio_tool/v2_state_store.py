@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-APP_VERSION = "2.6.2"
+APP_VERSION = "2.7.3"
 DB_FILE_NAME = "fh6_radio_tool_v2.sqlite3"
 
 

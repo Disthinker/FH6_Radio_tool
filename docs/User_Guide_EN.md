@@ -128,3 +128,35 @@ Use the original XML from the game files. Avoid using XML files that were alread
 Use **Back Up Current Game Files** before large changes.
 
 Use **Restore Default Files** to restore original XML and bank files from the backup manifest.
+
+## Batch Marker Import
+
+Starting from v2.7.2, FH6 Radio Tool supports batch importing Marker parameters from CSV or JSON files.
+
+The recommended format is CSV. A blank template is included here:
+
+- `docs/examples/marker_import_template.csv`
+
+An import-ready example converted from the provided song marker spreadsheet is also included:
+
+- `docs/examples/marker_import_from_uploaded_song_samples.csv`
+
+How to use:
+
+1. Select and scan your music folder first.
+2. Go to the loop marker step.
+3. Click **Import markers** in the Marker parameter area.
+4. Select a CSV or JSON import file.
+5. The tool will first match rows by filename / display name. If name matching fails, it will try unique `SampleLength` matching.
+
+Recommended CSV columns:
+
+`MatchName, Filename, DisplayName, Artist, SampleRate, SampleLength, TrackStart, TrackDrop, TrackLoopStart, TrackLoopEnd, PostDrop, PostRaceLoopStart, PostRaceLoopEnd, DJSegment, StingerStart, DJStart, End`
+
+Note: After importing, manual preview is still recommended, especially for TrackLoop and PostRaceLoop transitions.
+
+## v2.7.3 Notes
+
+- In the station/music step, the user music list now has an editable Artist column.
+- The edited Artist value is saved per track and used for in-game XML display.
+- The previous "Export marker template" button is now named "Export markers".

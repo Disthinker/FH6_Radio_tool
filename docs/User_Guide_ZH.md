@@ -128,3 +128,35 @@ FH6 Radio Tool 不直接包含 Fmod Bank Tools。你需要在工具里选择它�
 点击“备份当前游戏文件”可以手动创建备份。
 
 点击“恢复默认文件”会根据备份 manifest 恢复原始 XML 和 bank。建议每次大规模替换前都先备份。
+
+## 批量导入 Marker 参数
+
+v2.7.2 起支持从 CSV 或 JSON 文件批量导入每首歌的 Marker 参数。
+
+推荐使用 CSV 格式。模板文件位于：
+
+- `docs/examples/marker_import_template.csv`
+
+本次也已经把提供的歌曲采样表整理为可导入示例：
+
+- `docs/examples/marker_import_from_uploaded_song_samples.csv`
+
+使用方法：
+
+1. 先选择并扫描音乐目录。
+2. 进入“设置循环点”步骤。
+3. 在 Marker 参数区域点击“批量导入 Marker”。
+4. 选择 CSV 或 JSON 文件。
+5. 工具会优先按文件名 / 显示名匹配音乐文件；如果名称无法匹配，会尝试使用唯一的 SampleLength 匹配。
+
+CSV 推荐字段：
+
+`MatchName, Filename, DisplayName, Artist, SampleRate, SampleLength, TrackStart, TrackDrop, TrackLoopStart, TrackLoopEnd, PostDrop, PostRaceLoopStart, PostRaceLoopEnd, DJSegment, StingerStart, DJStart, End`
+
+注意：导入后仍建议逐首试听确认，尤其是 TrackLoop 和 PostRaceLoop 的衔接效果。
+
+## v2.7.3 补充说明
+
+- 在“选择电台与歌曲”步骤中，右侧自己的音乐列表新增 Artist 列，可直接编辑歌手名。
+- 编辑后的 Artist 会按歌曲保存，并在生成 XML 时用于游戏内显示。
+- “导出导入模板”已改名为“导出 Marker”。

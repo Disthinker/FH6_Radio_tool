@@ -43,11 +43,24 @@ def build_scene_preview_plan(scenario: str, markers: dict[str, int], total_frame
         le = get("TrackLoopEnd", total_last)
         return ScenePreviewPlan(scenario, ls, le, True, ls, "比赛进行：TrackLoop 循环")
     if scenario == "finish":
+        # In many FH radio XMLs PostDrop can be earlier than TrackLoopEnd in the
+        # source file.  The old preview tried to play from TrackLoopEnd to
+        # PostDrop + N seconds; when PostDrop < TrackLoopEnd that collapsed into
+        # a one-sample range, so playback sounded like a click and jumped to the
+        # end.  Use a stable local window instead: prefer PostDrop when it is a
+        # valid marker, otherwise preview around TrackLoopEnd.
         tle = get("TrackLoopEnd", total_last)
-        pd = get("PostDrop", min(total_last, tle + seconds * sr))
+        raw_pd = int(markers.get("PostDrop", -1))
+        if 0 <= raw_pd <= total_last:
+            center = _clamp(raw_pd, total_last)
+            start = max(0, center - seconds * sr)
+            end = min(total_last, center + seconds * sr)
+            if end <= start:
+                end = min(total_last, start + seconds * sr)
+            return ScenePreviewPlan(scenario, start, max(start + 1, end), False, None, "冲线：PostDrop 前后预览")
         start = max(0, tle - seconds * sr)
-        end = max(start + 1, min(total_last, pd + seconds * sr))
-        return ScenePreviewPlan(scenario, start, end, False, None, "冲线：TrackLoopEnd 前后到 PostDrop 附近")
+        end = min(total_last, tle + seconds * sr)
+        return ScenePreviewPlan(scenario, start, max(start + 1, end), False, None, "冲线：TrackLoopEnd 前后预览")
     ps = get("PostRaceLoopStart", get("PostDrop", get("TrackLoopStart", 0)))
     pe = get("PostRaceLoopEnd", total_last)
     return ScenePreviewPlan(scenario, ps, pe, True, ps, "冲线后：PostRaceLoop 循环")
