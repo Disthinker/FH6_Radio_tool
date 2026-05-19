@@ -63,3 +63,25 @@ Fmod Bank Tools is treated as an external program. FH6 Radio Tool only writes it
 Version: **v2.6.2 formal release package**
 
 This release package has removed old preview readme files, old audit logs, and development-only documents from previous iterations.
+
+
+
+## Acknowledgements / 致谢
+
+FH6 Radio Tool v2 was not created in isolation. During the development of v2, we referred to several community tools, open-source projects, and user-made tutorials that helped clarify the full radio replacement workflow.
+
+Special thanks to the author of this Bilibili tutorial:
+
+https://www.bilibili.com/opus/1203552915611975682#reply299863540801
+
+The tutorial provided a very clear explanation of the overall process, especially the workflow around extracting banks, replacing tracks, rebuilding files, and thinking about loop point selection. It helped us better understand which parts of the old workflow were too complicated for normal users, and directly inspired the goal of making FH6 Radio Tool v2 more integrated and beginner-friendly.
+
+We would also like to thank the following projects and tools:
+
+\- **Fmod Bank Tools** — used as the external FMOD bank extract / rebuild tool.
+\- **seamless-loop-music** — provided useful reference ideas for loop detection, loop preview, and seamless loop workflows.
+\- **PyMusicLooper** — provided reference ideas for automatic music loop point detection.
+
+Please note that FH6 Radio Tool v2 uses Fmod Bank Tools as an external tool and does not bundle it directly. The loop candidate feature in the current version is still experimental and usually requires manual adjustment.
+
+Thanks to all tutorial authors, tool developers, and community users who shared feedback, reported issues, and helped improve the FH6 radio replacement workflow.
