@@ -146,7 +146,7 @@ def write_assets_txts(xml_path: Path, station_name: str, adopted_files: list[str
 def write_manual_steps(result: ProjectPrepareResult, music_dir: Path) -> Path:
     path = result.work_dir / "manual_fmod_bank_tools_steps.txt"
     lines = [
-        "FH6 Radio Tool v2.0 手动 bank 重构提示",
+        "FH6 Radio Tool v2.1 手动 bank 重构提示",
         "=" * 48,
         "",
         "本工具不再自动调用或适配 Fmod Bank Tools。",

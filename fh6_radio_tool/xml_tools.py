@@ -10,6 +10,25 @@ from .metadata_tools import TrackMetadata
 from .segment_tools import MARKER_ORDER
 
 
+# Markers that control normal track playback and race/post-race music state.
+# These are safe to regenerate for replacement songs.
+PLAYBACK_MARKERS = [
+    "TrackStart",
+    "TrackDrop",
+    "TrackLoopStart",
+    "TrackLoopEnd",
+    "PostDrop",
+    "PostRaceLoopStart",
+    "PostRaceLoopEnd",
+    "End",
+]
+
+# Markers related to DJ voice / stinger timing.
+# Do not auto-fill these: forcing them to 0 can make free-roam DJ transitions
+# cut to another song or overlap audio after the DJ finishes talking.
+CONTROL_MARKERS = ["DJSegment", "StingerStart", "DJStart"]
+
+
 def parse_xml(xml_path: Path) -> ET.ElementTree:
     if not xml_path.exists():
         raise FileNotFoundError(f"XML 文件不存在: {xml_path}")
@@ -120,6 +139,98 @@ def build_track_patches(
     return patches
 
 
+def _clear_known_markers(sample: ET.Element, marker_names: list[str] | set[str] | None = None) -> None:
+    """Remove marker fields for the given names before writing replacements.
+
+    v3.7.8 only clears playback/race markers by default.  DJ/Stinger
+    markers are station transition controls; if the user did not explicitly
+    set them, we preserve the original XML values instead of forcing 0 or -1.
+    """
+    known = set(marker_names or MARKER_ORDER)
+
+    for name in known:
+        sample.attrib.pop(name, None)
+
+    for marker in list(sample.findall("Marker")):
+        if marker.get("Name") in known:
+            sample.remove(marker)
+
+
+def _safe_marker_positions(markers: SegmentMarkers, audio: AudioInfo) -> dict[str, int]:
+    """Return a conservative marker set for track/race playback only.
+
+    v3.7.7 filled every known marker, including DJSegment / DJStart /
+    StingerStart, with 0 when the user had not set them.  That fixed some
+    in-race missing-marker cases, but could disturb free-roam DJ transitions.
+
+    v3.7.8 therefore only auto-generates normal track playback markers:
+    TrackStart, TrackDrop, TrackLoopStart/End, PostDrop, PostRaceLoopStart/End,
+    and End.  DJ/Stinger markers are handled separately and only overwritten
+    when the user explicitly saved them.
+    """
+    end_sample = max(0, int(audio.sample_length) - 1)
+    positions: dict[str, int] = {}
+
+    def clamp(value: object, default: int) -> int:
+        try:
+            value_i = int(value)
+        except Exception:
+            value_i = int(default)
+        return max(0, min(value_i, end_sample))
+
+    raw = dict(markers.positions or {})
+
+    start_default = clamp(raw.get("TrackStart", 0), 0)
+    end_default = clamp(raw.get("End", end_sample), end_sample)
+    if end_default < start_default:
+        end_default = start_default
+
+    defaults = {
+        "TrackStart": start_default,
+        "TrackDrop": start_default,
+        "TrackLoopStart": start_default,
+        "TrackLoopEnd": end_default,
+        "PostDrop": start_default,
+        "PostRaceLoopStart": start_default,
+        "PostRaceLoopEnd": end_default,
+        "End": end_default,
+    }
+
+    for name in PLAYBACK_MARKERS:
+        positions[name] = clamp(raw.get(name, defaults[name]), defaults[name])
+
+    for start_name, end_name in [
+        ("TrackLoopStart", "TrackLoopEnd"),
+        ("PostRaceLoopStart", "PostRaceLoopEnd"),
+    ]:
+        if positions[end_name] < positions[start_name]:
+            positions[end_name] = positions[start_name]
+
+    if positions["End"] < positions["TrackStart"]:
+        positions["End"] = positions["TrackStart"]
+
+    return positions
+
+
+def _explicit_control_marker_positions(markers: SegmentMarkers, audio: AudioInfo) -> dict[str, int]:
+    """Return DJ/Stinger markers only when the user explicitly set them."""
+    end_sample = max(0, int(audio.sample_length) - 1)
+    raw = dict(markers.positions or {})
+    positions: dict[str, int] = {}
+
+    for name in CONTROL_MARKERS:
+        if name not in raw:
+            continue
+        try:
+            value = int(raw[name])
+        except Exception:
+            continue
+        if value < 0:
+            continue
+        positions[name] = max(0, min(value, end_sample))
+
+    return positions
+
 def _set_marker(sample: ET.Element, name: str, position: int) -> None:
     """Write a marker in both supported forms.
 
@@ -183,10 +294,18 @@ def patch_station_samples(
         if "IsXCloudModeSafe" in sample.attrib:
             sample.set("IsXCloudModeSafe", "true")
 
-        for marker_name in MARKER_ORDER:
-            value = patch.markers.positions.get(marker_name)
-            if value is not None and int(value) >= 0:
-                _set_marker(sample, marker_name, int(value))
+        # v3.7.8 稳定性修复：
+        # 只自动重写普通播放 / 比赛态 Marker。
+        # DJSegment / DJStart / StingerStart 属于 DJ/转场控制点，
+        # 未手动设置时保留原 XML，避免漫游模式 DJ 后切歌或叠歌。
+        _clear_known_markers(sample, PLAYBACK_MARKERS)
+        safe_positions = _safe_marker_positions(patch.markers, patch.audio)
+
+        for marker_name in PLAYBACK_MARKERS:
+            _set_marker(sample, marker_name, safe_positions[marker_name])
+
+        for marker_name, value in _explicit_control_marker_positions(patch.markers, patch.audio).items():
+            _set_marker(sample, marker_name, value)
 
     return new_tree
 

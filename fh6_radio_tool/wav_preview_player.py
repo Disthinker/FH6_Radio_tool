@@ -37,6 +37,10 @@ class WavPreviewPlayer(QObject):
         self._paused = False
         self._eof = False
         self._drain_ticks = 0
+        self._range_end: int | None = None
+        self._loop_start: int | None = None
+        self._loop_end: int | None = None
+        self._loop_enabled = False
 
     @property
     def samplerate(self) -> int:
@@ -62,6 +66,7 @@ class WavPreviewPlayer(QObject):
             raise ValueError(f"试听播放器只支持 16-bit PCM WAV：{path}")
 
         self._position = 0
+        self.clear_range()
         self.positionChanged.emit(0)
 
     def play(self) -> None:
@@ -107,6 +112,10 @@ class WavPreviewPlayer(QObject):
         self._paused = False
         self._eof = False
         self._drain_ticks = 0
+        self._range_end = None
+        self._loop_start = None
+        self._loop_end = None
+        self._loop_enabled = False
         self._position = 0
 
         if emit_position:
@@ -119,6 +128,7 @@ class WavPreviewPlayer(QObject):
         if self._playing:
             self._close_stream_only()
 
+        self.clear_range()
         self._position = sample
         self.positionChanged.emit(self._position)
 
@@ -147,6 +157,28 @@ class WavPreviewPlayer(QObject):
         self._paused = False
         self._eof = False
         self._drain_ticks = 0
+
+    def play_range(self, start_sample: int, end_sample: int | None = None, *, loop: bool = False, loop_start_sample: int | None = None) -> None:
+        """Play a bounded sample range.  If loop=True, jump to loop_start_sample or start_sample at end_sample."""
+        if self._path is None:
+            return
+        total_last = max(0, self._total_frames - 1)
+        start = max(0, min(int(start_sample), total_last))
+        end = None if end_sample is None else max(start + 1, min(int(end_sample), total_last))
+        self._range_end = end
+        loop_start = start if loop_start_sample is None else max(0, min(int(loop_start_sample), total_last))
+        self._loop_start = loop_start
+        self._loop_end = end
+        self._loop_enabled = bool(loop and end is not None and end > loop_start)
+        self._position = start
+        self.positionChanged.emit(self._position)
+        self._start_stream_at(self._position)
+
+    def clear_range(self) -> None:
+        self._range_end = None
+        self._loop_start = None
+        self._loop_end = None
+        self._loop_enabled = False
 
     def _start_stream_at(self, sample: int) -> None:
         if self._path is None:
@@ -216,6 +248,16 @@ class WavPreviewPlayer(QObject):
         frames_written = written // frame_bytes
         self._position = max(0, min(self._position + frames_written, max(0, self._total_frames - 1)))
         self.positionChanged.emit(self._position)
+
+        if self._range_end is not None and self._position >= self._range_end:
+            if self._loop_enabled and self._loop_start is not None:
+                self._close_stream_only()
+                self._position = self._loop_start
+                self.positionChanged.emit(self._position)
+                self._start_stream_at(self._position)
+                return
+            self._eof = True
+            return
 
         if self._position >= max(0, self._total_frames - 1):
             self._eof = True

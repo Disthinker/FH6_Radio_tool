@@ -5,14 +5,15 @@ cd /d "%~dp0"
 
 echo.
 echo ============================================================
-echo  FH6 Radio Tool - Environment Setup
+echo  FH6 Radio Tool v2.6.2 - Environment Setup
 echo ============================================================
 echo.
-echo This script will create a local virtual environment:
-echo   .venv
-echo.
+echo This script will create a local virtual environment: .venv
 echo Dependencies will be installed into .venv only.
 echo Your global Python environment will not be modified.
+echo.
+echo Fmod Bank Tools one-click automation uses pywinauto on Windows.
+echo pywinauto is installed automatically through requirements.txt.
 echo.
 echo PyPI mirrors will be tried in this order:
 echo   1. Tsinghua mirror
@@ -44,7 +45,7 @@ set "MIRROR_ALI=https://mirrors.aliyun.com/pypi/simple"
 set "MIRROR_PYPI=https://pypi.org/simple"
 
 echo.
-echo [1/3] Upgrade pip with Tsinghua mirror...
+echo [1/3] Upgrading pip...
 %PIP_EXE% install --upgrade pip -i %MIRROR_TUNA% --trusted-host pypi.tuna.tsinghua.edu.cn
 if errorlevel 1 (
   echo [WARN] Tsinghua mirror failed. Trying Aliyun mirror...
@@ -64,7 +65,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo [2/3] Install dependencies...
+echo [2/3] Installing dependencies...
 %PIP_EXE% install -r requirements.txt -i %MIRROR_TUNA% --trusted-host pypi.tuna.tsinghua.edu.cn
 if errorlevel 1 (
   echo [WARN] Tsinghua mirror failed. Trying Aliyun mirror...
@@ -78,7 +79,7 @@ if errorlevel 1 (
   echo.
   echo [ERROR] Failed to install dependencies.
   echo You can retry later, or manually run:
-  echo   .venv\Scripts\python.exe -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+  echo   .venv\Scripts\python.exe -m pip install -r requirements.txt
   echo.
   pause
   exit /b 1
@@ -95,11 +96,18 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+%PY_EXE% -c "import platform, importlib; print('pywinauto check:', 'SKIP non-Windows' if platform.system()!='Windows' else ('OK' if importlib.import_module('pywinauto') else 'OK'))"
+if errorlevel 1 (
+  echo.
+  echo [WARN] pywinauto import check failed. The main tool can still run,
+  echo but Fmod GUI auto-click may require manual installation:
+  echo   .venv\Scripts\python.exe -m pip install pywinauto
+  echo.
+)
 
 echo.
 echo ============================================================
-echo  Setup finished.
-echo  Next step: run the launcher batch file.
+echo  Setup finished. Run run_tool.bat to start FH6 Radio Tool.
 echo ============================================================
 echo.
 pause

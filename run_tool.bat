@@ -5,22 +5,27 @@ cd /d "%~dp0"
 
 echo.
 echo ============================================================
-echo  FH6 Radio Tool - Launcher
+echo  FH6 Radio Tool v2.6.2 - Launcher
 echo ============================================================
 echo.
 
-if exist ".venv\Scripts\python.exe" (
-  ".venv\Scripts\python.exe" -m fh6_radio_tool.app
-) else (
-  echo [WARN] .venv was not found.
+if not exist ".venv\Scripts\python.exe" (
+  echo [WARN] .venv was not found. Please run setup_env.bat first.
   echo Trying system Python...
-  python -m fh6_radio_tool.app
+  where py >nul 2>nul
+  if %errorlevel%==0 (
+    py -3 -m fh6_radio_tool.app
+  ) else (
+    python -m fh6_radio_tool.app
+  )
+) else (
+  ".venv\Scripts\python.exe" -m fh6_radio_tool.app
 )
 
 if errorlevel 1 (
   echo.
-  echo [ERROR] Failed to start the tool.
-  echo Please run the setup batch file first.
+  echo [ERROR] Failed to start FH6 Radio Tool v2.6.2.
+  echo Please run setup_env.bat first, then retry.
   echo.
 )
 
