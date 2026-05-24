@@ -1,0 +1,418 @@
+diff -ruN orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/README.md FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/README.md
+--- orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/README.md	2026-05-23 16:07:13.000000000 +0000
++++ FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/README.md	2026-05-23 16:15:56.072216606 +0000
+@@ -222,7 +222,7 @@
+ - This is intended to support stations whose playable songs are split across multiple bank files, while avoiding accidental matches from unrelated stations.
+ 
+ 
+-## v3.0.36
++## v3.0.37
+ 
+ - Added the official application icon to the PyInstaller EXE build.
+ - The main window also uses the bundled icon when running from source or from the portable EXE package.
+@@ -242,10 +242,17 @@
+ - The Nuitka builder now treats `pywinauto`/Win32 automation dependencies as required and includes the relevant packages more aggressively.
+ - The Nexus Nuitka package no longer bundles a separate `tools/ffmpeg.exe` by default, reducing quarantine risk.
+ 
+-## v3.0.36 hotfix
++## v3.0.37 hotfix
+ 
+ - Removed the obsolete user-facing **Auto-control Fmod Bank Tools** checkbox from the normal workflow.
+ - One-click replacement, package generation, and main-menu music replacement now force Fmod Bank Tools automation internally.
+ - Fixed the legacy path where unchecking the old option could still show a misleading `setup_env.bat` / `pywinauto` prompt in the portable EXE.
+-- Portable EXE users should not use old v2 `setup_env.bat` files to repair the compiled program; update to v3.0.36 or newer instead.
++- Portable EXE users should not use old v2 `setup_env.bat` files to repair the compiled program; update to v3.0.37 or newer instead.
++
++
++## v3.0.37 build hotfix
++
++- Fixed PyInstaller BAT build failure where `build_pyinstaller\app.ico` was deleted by the clean step before PyInstaller copied it into the EXE.
++- The builder now regenerates the temporary icon after cleaning, and falls back to a no-custom-icon build if icon generation fails.
++- Use `build_pyinstaller_release.bat` from this package; do not reuse older v3.0.30/v3.0.36 build folders.
+ 
+diff -ruN orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/RELEASE_NOTES.md FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/RELEASE_NOTES.md
+--- orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/RELEASE_NOTES.md	2026-05-23 16:07:15.000000000 +0000
++++ FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/RELEASE_NOTES.md	2026-05-23 16:15:56.070988400 +0000
+@@ -1,4 +1,15 @@
+-# FH6 Radio Tool v3.0.36 Hotfix
++# FH6 Radio Tool v3.0.37 Build Hotfix
++
++## Fixes
++
++- Fixed `build_pyinstaller_release.bat` failing at `Copying icon to EXE` with `FileNotFoundError: build_pyinstaller\app.ico not found`.
++- Root cause: the builder created the temporary icon before the clean step, then deleted `build_pyinstaller`, so PyInstaller could not find the icon later.
++- The builder now creates the temporary icon after cleaning. If the icon cannot be generated, it continues without a custom icon instead of failing the whole build.
++- Functionality and one-click workflows remain the priority; PyInstaller remains the recommended packaging path.
++
++---
++
++# FH6 Radio Tool v3.0.37 Hotfix
+ 
+ ## Fixes
+ 
+@@ -12,16 +23,16 @@
+ 
+ Run `build_pyinstaller_release.bat` on native Windows. It creates:
+ 
+-`dist_release\FH6_Radio_Tool_v3.0.36_nexus_exe_portable.zip`
++`dist_release\FH6_Radio_Tool_v3.0.37_nexus_exe_portable.zip`
+ 
+ Nuitka scripts are still kept, but PyInstaller is the safer packaging option for this release.
+ 
+ ---
+ 
+-# FH6 Radio Tool v3.0.36 Hotfix
++# FH6 Radio Tool v3.0.37 Hotfix
+ 
+ - Removed the obsolete user-facing **Auto-control Fmod Bank Tools** checkbox from the normal workflow.
+ - One-click replacement, package generation, and main-menu music replacement now force Fmod Bank Tools GUI automation internally.
+ - Fixed the legacy path where unchecking the old option could still show a misleading `setup_env.bat` / `pywinauto` prompt in the portable EXE.
+-- If automation dependencies are missing in a compiled EXE, the tool now reports it as a bad/old build and asks for v3.0.36 or newer, instead of asking users to run old v2 setup scripts.
++- If automation dependencies are missing in a compiled EXE, the tool now reports it as a bad/old build and asks for v3.0.37 or newer, instead of asking users to run old v2 setup scripts.
+ - Main-menu music replacement remains fixed to `GLB_RadioPressStart.assets.bank`; users only choose the replacement music file.
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/__pycache__/build_nuitka_entry.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/__pycache__/build_nuitka_entry.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/__pycache__/build_pyinstaller_entry.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/__pycache__/build_pyinstaller_entry.cpython-313.pyc differ
+diff -ruN orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/build_portable_release.bat FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/build_portable_release.bat
+--- orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/build_portable_release.bat	2026-05-23 16:07:40.000000000 +0000
++++ FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/build_portable_release.bat	2026-05-23 16:15:35.672096034 +0000
+@@ -3,14 +3,14 @@
+ setlocal EnableExtensions
+ cd /d "%~dp0"
+ 
+-set "APP_VERSION=3.0.36"
++set "APP_VERSION=3.0.37"
+ 
+ echo.
+ echo ============================================================
+ echo  FH6 Radio Tool v%APP_VERSION% - PyInstaller EXE Portable Release Builder
+ echo ============================================================
+ echo.
+-echo This script builds a Windows portable EXE package using PyInstaller. For v3.0.36, build_pyinstaller_release.bat is the recommended alias.
++echo This script builds a Windows portable EXE package using PyInstaller. For v3.0.37, build_pyinstaller_release.bat is the recommended alias.
+ echo Output:
+ echo   dist_release\FH6_Radio_Tool_v%APP_VERSION%_nexus_exe_portable.zip
+ echo.
+diff -ruN orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/build_pyinstaller_release.bat FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/build_pyinstaller_release.bat
+--- orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/build_pyinstaller_release.bat	2026-05-23 16:07:39.000000000 +0000
++++ FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/build_pyinstaller_release.bat	2026-05-23 16:15:35.671914690 +0000
+@@ -12,7 +12,7 @@
+ echo   dist_release\FH6_Radio_Tool_v*_nexus_exe_portable.zip
+ echo.
+ echo Notes:
+-echo   - This is the recommended builder for v3.0.36.
++echo   - This is the recommended builder for v3.0.37.
+ echo   - Run this on native Windows, not WSL/Linux.
+ echo   - Fmod Bank Tools is NOT bundled. Players select their own exe.
+ echo   - The final ZIP contains no loose .ico, source folder, or nested archive.
+diff -ruN orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/docs/User_Guide_EN.md FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/docs/User_Guide_EN.md
+--- orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/docs/User_Guide_EN.md	2026-05-23 16:07:13.000000000 +0000
++++ FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/docs/User_Guide_EN.md	2026-05-23 16:15:35.671145959 +0000
+@@ -149,7 +149,7 @@
+ 
+ FH6 Radio Tool does not include Fmod Bank Tools. Select its `Fmod_Bank_Tools.exe` path in the final step.
+ 
+-During Extract/Rebuild, do not close the Fmod Bank Tools window manually. Starting from v3.0.36, normal users no longer need an Auto-control checkbox; the portable EXE enables the workflow automatically. If the automation component is still reported unavailable, update to v3.0.36 or newer.
++During Extract/Rebuild, do not close the Fmod Bank Tools window manually. Starting from v3.0.37, normal users no longer need an Auto-control checkbox; the portable EXE enables the workflow automatically. If the automation component is still reported unavailable, update to v3.0.37 or newer.
+ 
+ ## 8. Troubleshooting
+ 
+diff -ruN orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/docs/User_Guide_ZH.md FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/docs/User_Guide_ZH.md
+--- orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/docs/User_Guide_ZH.md	2026-05-23 16:07:13.000000000 +0000
++++ FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/docs/User_Guide_ZH.md	2026-05-23 16:15:35.671593043 +0000
+@@ -149,7 +149,7 @@
+ 
+ FH6 Radio Tool 不直接包含 Fmod Bank Tools。你需要在工具里选择它的 `Fmod_Bank_Tools.exe`。
+ 
+-如果一键流程中 Fmod Bank Tools 弹出窗口，请不要在 Extract/Rebuild 过程中手动关闭它。v3.0.36 起普通用户不再需要勾选自动控制选项；便携 EXE 会自动启用该流程。若仍提示自动控制组件不可用，请更新到 v3.0.36 或更新版本。
++如果一键流程中 Fmod Bank Tools 弹出窗口，请不要在 Extract/Rebuild 过程中手动关闭它。v3.0.37 起普通用户不再需要勾选自动控制选项；便携 EXE 会自动启用该流程。若仍提示自动控制组件不可用，请更新到 v3.0.37 或更新版本。
+ 
+ ## 8. 常见问题
+ 
+diff -ruN orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__init__.py FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__init__.py
+--- orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__init__.py	2026-05-23 16:07:13.000000000 +0000
++++ FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__init__.py	2026-05-23 16:15:35.648859339 +0000
+@@ -1 +1 @@
+-__version__ = "3.0.36"
++__version__ = "3.0.37"
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/__init__.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/__init__.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/app.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/app.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/app_legacy.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/app_legacy.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/async_tools.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/async_tools.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/bank_tools.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/bank_tools.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/cli.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/cli.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/core.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/core.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/ffmpeg_tools.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/ffmpeg_tools.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/fmod_automation.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/fmod_automation.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/marker_import_tools.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/marker_import_tools.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/metadata_tools.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/metadata_tools.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/models.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/models.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/order_tools.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/order_tools.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/project_tools.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/project_tools.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/runtime_tools.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/runtime_tools.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/segment_tools.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/segment_tools.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/simple_tools.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/simple_tools.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/txt_tools.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/txt_tools.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/ui.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/ui.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/v2_deploy_tools.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/v2_deploy_tools.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/v2_game_tools.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/v2_game_tools.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/v2_loop_tools.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/v2_loop_tools.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/v2_state_store.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/v2_state_store.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/v2_ui.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/v2_ui.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/volume_tools.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/volume_tools.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/wav_preview_player.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/wav_preview_player.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/wav_tools.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/wav_tools.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/__pycache__/xml_tools.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/__pycache__/xml_tools.cpython-313.pyc differ
+diff -ruN orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/fmod_automation.py FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/fmod_automation.py
+--- orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/fmod_automation.py	2026-05-23 16:08:48.000000000 +0000
++++ FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/fmod_automation.py	2026-05-23 16:15:35.653765136 +0000
+@@ -66,7 +66,7 @@
+ def _automation_win32_fallback_available() -> bool:
+     """Return whether the built-in ctypes/Win32 GUI trigger can be used.
+ 
+-    v3.0.36: pywinauto can fail in otherwise valid Windows environments with
++    v3.0.37: pywinauto can fail in otherwise valid Windows environments with
+     errors such as "Typelib different than module" from a stale comtypes cache.
+     The one-click workflow should not be blocked by that import error, because
+     Fmod Bank Tools can also be triggered with normal Win32 window messages and
+@@ -174,7 +174,7 @@
+     """Return whether automatic GUI control is available, plus diagnostics.
+ 
+     Kept under the old function name for compatibility with the UI code.  Since
+-    v3.0.36, a broken pywinauto/comtypes import no longer means the whole one-
++    v3.0.37, a broken pywinauto/comtypes import no longer means the whole one-
+     click workflow is unavailable on Windows: the tool can fall back to built-in
+     ctypes/Win32 button/shortcut triggering.
+     """
+@@ -209,12 +209,12 @@
+     if is_frozen_app():
+         return (
+             f"自动控制组件不可用：{detail}。"
+-            "请使用 v3.0.36 或更新版本重新下载/重新打包；不要运行旧版 v2 的 setup_env.bat 修复 EXE。"
++            "请使用 v3.0.37 或更新版本重新下载/重新打包；不要运行旧版 v2 的 setup_env.bat 修复 EXE。"
+         )
+     return (
+         f"自动控制组件不可用：{detail}。"
+         "如果是在开发者源码环境中运行，请先执行 setup_env.bat 或 pip install -r requirements.txt；"
+-        "如果出现 Typelib different than module，请删除旧虚拟环境后用 v3.0.36 重新安装，或直接使用 PyInstaller 打包版。"
++        "如果出现 Typelib different than module，请删除旧虚拟环境后用 v3.0.37 重新安装，或直接使用 PyInstaller 打包版。"
+     )
+ 
+ def layout_from_exe(exe_path: Path) -> FmodToolLayout:
+@@ -1330,7 +1330,7 @@
+             return FmodAutomationResult(
+                 False,
+                 action,
+-                message + " 内部自动触发未启用，因此已停止等待；请使用 v3.0.36 或更新版本重新构建。" + pywinauto_user_hint(),
++                message + " 内部自动触发未启用，因此已停止等待；请使用 v3.0.37 或更新版本重新构建。" + pywinauto_user_hint(),
+                 layout,
+                 None,
+                 proc.pid,
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/loop_engine/__pycache__/__init__.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/loop_engine/__pycache__/__init__.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/loop_engine/__pycache__/ab_splicing.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/loop_engine/__pycache__/ab_splicing.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/loop_engine/__pycache__/correlation_matcher.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/loop_engine/__pycache__/correlation_matcher.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/loop_engine/__pycache__/scene_preview.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/loop_engine/__pycache__/scene_preview.cpython-313.pyc differ
+diff -ruN orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/v2_state_store.py FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/v2_state_store.py
+--- orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/v2_state_store.py	2026-05-23 16:07:13.000000000 +0000
++++ FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/v2_state_store.py	2026-05-23 16:15:35.659528200 +0000
+@@ -9,7 +9,7 @@
+ 
+ from .runtime_tools import runtime_root
+ 
+-APP_VERSION = "3.0.36"
++APP_VERSION = "3.0.37"
+ DB_FILE_NAME = "fh6_radio_tool_v2.sqlite3"
+ 
+ 
+diff -ruN orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/v2_ui.py FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/v2_ui.py
+--- orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/fh6_radio_tool/v2_ui.py	2026-05-23 16:08:16.000000000 +0000
++++ FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/fh6_radio_tool/v2_ui.py	2026-05-23 16:15:35.664422604 +0000
+@@ -368,7 +368,7 @@
+         self.bank_root_edit.setReadOnly(True)
+         self.bank_root_edit.setPlaceholderText("扫描游戏根目录后自动定位 media/Audio/FMODBanks")
+         self.fmod_tool_edit = QLineEdit(str(self.store.get_setting("fmod_tool", "")))
+-        # v3.0.36: one-click / package workflows always use automatic Fmod Bank Tools
++        # v3.0.37: one-click / package workflows always use automatic Fmod Bank Tools
+         # control.  The old user-toggle caused a confusing legacy path where unchecking
+         # it made the app ask for setup_env.bat/pywinauto even in the portable EXE.
+         # Keep the QCheckBox object only for backward compatibility with saved UI code,
+@@ -1364,7 +1364,7 @@
+     def automation_component_warning_text(self, context_zh: str, context_en: str) -> tuple[str, str]:
+         """User-facing message when pywinauto is unavailable.
+ 
+-        v3.0.36 removes the obsolete auto-control checkbox and fixes the legacy path that asked Nexus EXE users
++        v3.0.37 removes the obsolete auto-control checkbox and fixes the legacy path that asked Nexus EXE users
+         to run setup_env.bat even though the portable package intentionally does
+         not contain setup_env.bat.
+         """
+@@ -1376,13 +1376,13 @@
+                 f"{context_zh}需要自动控制 Fmod Bank Tools。\n\n"
+                 f"当前便携 EXE 的自动控制组件不可用：{detail}\n\n"
+                 "这个 Nexus/便携 EXE 包不会包含 setup_env.bat；运行 v2 旧版 setup_env.bat 也不会修复当前 EXE。\n"
+-                "请使用 v3.0.36 或更新版本重新下载/重新打包；不要使用旧 v2 环境修复 EXE。"
++                "请使用 v3.0.37 或更新版本重新下载/重新打包；不要使用旧 v2 环境修复 EXE。"
+             )
+             en = (
+                 f"{context_en} requires automatic control of Fmod Bank Tools.\n\n"
+                 f"The automation component bundled in this portable EXE is not available: {detail}\n\n"
+                 "This Nexus/portable EXE package does not include setup_env.bat, and running an old v2 setup_env.bat will not repair the current EXE.\n"
+-                "Please use v3.0.36 or a newer rebuilt package; do not repair this EXE with an old v2 environment."
++                "Please use v3.0.37 or a newer rebuilt package; do not repair this EXE with an old v2 environment."
+             )
+         else:
+             zh = (
+@@ -1400,7 +1400,7 @@
+     def _fmod_auto_click_enabled(self) -> bool:
+         """Return the forced Fmod GUI automation setting.
+ 
+-        v3.0.36 removes the old user-facing auto-control checkbox from the
++        v3.0.37 removes the old user-facing auto-control checkbox from the
+         normal workflow.  One-click and package generation require GUI
+         automation, so allowing users to disable it only created a dead-end
+         legacy warning about setup_env.bat/pywinauto.
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/scripts/__pycache__/build_exe_release.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/scripts/__pycache__/build_exe_release.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/scripts/__pycache__/build_nuitka_release.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/scripts/__pycache__/build_nuitka_release.cpython-313.pyc differ
+Binary files orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/scripts/__pycache__/build_portable_release.cpython-313.pyc and FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/scripts/__pycache__/build_portable_release.cpython-313.pyc differ
+diff -ruN orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/scripts/build_exe_release.py FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/scripts/build_exe_release.py
+--- orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/scripts/build_exe_release.py	2026-05-23 16:07:55.000000000 +0000
++++ FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/scripts/build_exe_release.py	2026-05-23 16:15:35.668866284 +0000
+@@ -88,23 +88,31 @@
+     return f"{src}{sep}{dst}"
+ 
+ 
+-def ensure_build_icon() -> None:
++def ensure_build_icon() -> bool:
+     """Create a temporary ICO only for PyInstaller build.
+ 
+-    The final Nexus upload package intentionally does not include loose .ico
+-    files. Nexus may treat uncommon loose file types as suspicious/unknown;
+-    the icon is embedded into FH6RadioTool.exe during build instead.
++    v3.0.37 fix: the previous script created build_pyinstaller/app.ico
++    before deleting build_pyinstaller during the clean step, so PyInstaller
++    failed at "Copying icon to EXE" with FileNotFoundError.  This helper is
++    now called after cleaning and returns False instead of failing the build
++    when no icon source is available.  Functionality is more important than
++    a custom icon.
+     """
+     APP_ICON.parent.mkdir(parents=True, exist_ok=True)
+     loose_icon = PROJECT_ROOT / "resources" / "app.ico"
+-    if loose_icon.exists():
+-        shutil.copy2(loose_icon, APP_ICON)
+-        return
+-    if APP_ICON_B64.exists():
+-        data = base64.b64decode(APP_ICON_B64.read_text(encoding="ascii"))
+-        APP_ICON.write_bytes(data)
+-        return
+-    raise RuntimeError("Missing application icon source: resources/app.ico or resources/app_icon_base64.txt")
++    try:
++        if loose_icon.exists():
++            shutil.copy2(loose_icon, APP_ICON)
++            return True
++        if APP_ICON_B64.exists():
++            data = base64.b64decode(APP_ICON_B64.read_text(encoding="ascii"))
++            APP_ICON.write_bytes(data)
++            return True
++    except Exception as exc:
++        log(f"      [WARN] Could not create build icon, continuing without custom icon: {exc}")
++        return False
++    log("      [WARN] No application icon source found; building without custom icon.")
++    return False
+ 
+ 
+ def find_imageio_ffmpeg() -> Path | None:
+@@ -137,14 +145,14 @@
+ 1. 双击 FH6RadioTool.exe 启动工具，不需要先运行 setup_env.bat。
+ 2. Fmod Bank Tools 仍然不会内置；请在工具设置里选择你自己的 Fmod_Bank_Tools.exe。
+ 3. output、backup、work 会生成在 FH6RadioTool.exe 同目录。
+-4. v3.0.36 已内置 Win32 fallback；如果 pywinauto/comtypes 异常，仍会尝试自动控制 Fmod Bank Tools。
++4. v3.0.37 已内置 Win32 fallback；如果 pywinauto/comtypes 异常，仍会尝试自动控制 Fmod Bank Tools。
+ 5. 如果 EXE 版异常，仍可回到源码包使用 setup_env.bat + run_tool.bat。
+ 
+ English:
+ 1. Double-click FH6RadioTool.exe to start. Python setup is not required.
+ 2. Fmod Bank Tools is still external; select your own Fmod_Bank_Tools.exe in settings.
+ 3. output, backup and work are created next to FH6RadioTool.exe.
+-4. v3.0.36 includes a Win32 fallback; if pywinauto/comtypes is broken, it can still try to control Fmod Bank Tools.
++4. v3.0.37 includes a Win32 fallback; if pywinauto/comtypes is broken, it can still try to control Fmod Bank Tools.
+ 5. If this EXE build has issues, use the source/batch package as fallback.
+ """
+     (bundle_dir / "README_EXE_PORTABLE.txt").write_text(text, encoding="utf-8")
+@@ -195,7 +203,6 @@
+     for rel in ["fh6_radio_tool/app.py", "fh6_radio_tool/v2_ui.py", "requirements.txt"]:
+         if not (PROJECT_ROOT / rel).exists():
+             raise RuntimeError(f"Missing required file: {rel}")
+-    ensure_build_icon()
+ 
+     log("[3/9] Python syntax check ...")
+     ok = compileall.compile_dir(str(PROJECT_ROOT / "fh6_radio_tool"), quiet=1, force=False)
+@@ -209,7 +216,8 @@
+     shutil.rmtree(PYINSTALLER_DIST, ignore_errors=True)
+     DIST_ROOT.mkdir(parents=True, exist_ok=True)
+ 
+-    log("[5/9] Running PyInstaller one-folder build ...")
++    log("[5/9] Running PyInstaller one-file build ...")
++    icon_ready = ensure_build_icon()
+     py = sys.executable
+     cmd = [
+         py, "-m", "PyInstaller",
+@@ -218,9 +226,12 @@
+         "--onefile",
+         "--windowed",
+         "--name", "FH6RadioTool",
+-        "--icon", str(APP_ICON),
+         "--workpath", str(PYINSTALLER_WORK),
+         "--distpath", str(PYINSTALLER_DIST),
++    ]
++    if icon_ready:
++        cmd += ["--icon", str(APP_ICON)]
++    cmd += [
+         # Intentionally do NOT use "--collect-all PySide6".  It pulls in
+         # QML/Quick/Charts/WebEngine modules that FH6 Radio Tool does not use,
+         # causing excessive build time and PyInstaller QtQml hook errors on
+diff -ruN orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/scripts/build_nuitka_release.py FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/scripts/build_nuitka_release.py
+--- orig36/FH6_Radio_Tool_v3_0_36_automation_fallback_builder/scripts/build_nuitka_release.py	2026-05-23 16:09:13.000000000 +0000
++++ FH6_Radio_Tool_v3_0_37_pyinstaller_icon_fix_builder/scripts/build_nuitka_release.py	2026-05-23 16:15:35.669473348 +0000
+@@ -19,7 +19,7 @@
+ APP_ICON_B64 = PROJECT_ROOT / "resources" / "app_icon_base64.txt"
+ ARCHIVE_EXTENSIONS = {".zip", ".7z", ".rar", ".tar", ".gz", ".tgz", ".bz2", ".tbz", ".xz", ".cab", ".iso"}
+ 
+-# v3.0.36: automatic Fmod Bank Tools control can use either pywinauto
++# v3.0.37: automatic Fmod Bank Tools control can use either pywinauto
+ # or the built-in ctypes/Win32 fallback.  Do not fail the whole build only
+ # because pywinauto/comtypes has a stale typelib cache.
+ REQUIRED_WINDOWS_AUTOMATION_IMPORTS = [
+@@ -151,7 +151,7 @@
+ 3. output、backup、work 会生成在 FH6RadioTool.exe 同目录。
+ 4. 本包不包含 loose .ico、游戏文件、音乐文件、bank 文件或源码目录。
+ 5. 本 EXE 已内置自动控制依赖；用户不需要、也不能通过旧版 setup_env.bat 修复此 EXE。
+-6. 如果自动控制仍提示缺失，请下载 v3.0.36 或更新版本重新打包。
++6. 如果自动控制仍提示缺失，请下载 v3.0.37 或更新版本重新打包。
+ 
+ English:
+ 1. Double-click FH6RadioTool.exe to start. Python setup is not required.
+@@ -159,7 +159,7 @@
+ 3. output, backup and work are created next to FH6RadioTool.exe.
+ 4. This package contains no loose .ico files, game files, music files, bank files or source folder.
+ 5. This EXE should include the automation dependencies; users do not need and cannot repair it with an old setup_env.bat.
+-6. If automation is still reported missing, rebuild/download v3.0.36 or newer.
++6. If automation is still reported missing, rebuild/download v3.0.37 or newer.
+ """
+     (bundle_dir / "README_NUITKA_PORTABLE.txt").write_text(text, encoding="utf-8")
+ 
+@@ -216,7 +216,7 @@
+ def verify_windows_automation_imports() -> None:
+     """Check automation support without requiring a healthy pywinauto/comtypes import.
+ 
+-    v3.0.36 can use an internal ctypes/Win32 fallback when pywinauto fails with
++    v3.0.37 can use an internal ctypes/Win32 fallback when pywinauto fails with
+     stale comtypes errors such as "Typelib different than module". Therefore the
+     build should not be blocked solely because pywinauto import is broken.
+     """
+@@ -314,7 +314,7 @@
+     shutil.rmtree(stage_root, ignore_errors=True)
+     package_dir.mkdir(parents=True, exist_ok=True)
+     shutil.copy2(onefile_exe, package_dir / "FH6RadioTool.exe")
+-    # v3.0.36: do not bundle a separate ffmpeg.exe in the Nexus package.
++    # v3.0.37: do not bundle a separate ffmpeg.exe in the Nexus package.
+     # The app can use imageio-ffmpeg from the bundled Python package or a user-provided PATH/tool.
+     if (PROJECT_ROOT / "config").exists():
+         shutil.copytree(PROJECT_ROOT / "config", package_dir / "config")

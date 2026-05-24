@@ -1,0 +1,516 @@
+Only in FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder: HOTFIX_DIFF_v3.0.34.patch
+diff -ru orig/FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/README.md FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/README.md
+--- orig/FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/README.md	2026-05-23 14:43:21.000000000 +0000
++++ FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/README.md	2026-05-23 15:09:04.233774674 +0000
+@@ -227,10 +227,17 @@
+ - Added the official application icon to the PyInstaller EXE build.
+ - The main window also uses the bundled icon when running from source or from the portable EXE package.
+ 
+-## v3.0.33 main menu / press-start music replacement
++## v3.0.34 main menu / press-start music replacement
+ 
+ The main menu music target is now fixed to `GLB_RadioPressStart.assets.bank`.
+ Users do not need to choose the bank manually. After selecting the FH6 game root, choose only the replacement audio file in the optional main-menu music panel. The tool will automatically find the bank under `media/Audio/FMODBanks`, replace its single music entry, and then either generate a mod package or perform one-click replacement with backup.
+ 
+ 主菜单 / Press Start 音乐目标已固定为 `GLB_RadioPressStart.assets.bank`。用户不再需要手动选择 bank。选择 FH6 游戏根目录后，只需要在主菜单音乐区域选择想替换进去的音乐文件，工具会自动从 `media/Audio/FMODBanks` 定位该 bank，替换其中唯一音乐音频，然后生成 Mod 包或一键替换并自动备份。
+ 
++
++
++## v3.0.34 hotfix
++
++- Fixed the misleading v3.0.33 automation prompt that asked portable EXE users to run `setup_env.bat` even though the Nexus/Nuitka package does not include it.
++- The Nuitka builder now treats `pywinauto`/Win32 automation dependencies as required and includes the relevant packages more aggressively.
++- The Nexus Nuitka package no longer bundles a separate `tools/ffmpeg.exe` by default, reducing quarantine risk.
+diff -ru orig/FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/RELEASE_NOTES.md FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/RELEASE_NOTES.md
+--- orig/FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/RELEASE_NOTES.md	2026-05-23 14:43:20.000000000 +0000
++++ FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/RELEASE_NOTES.md	2026-05-23 15:09:04.234254583 +0000
+@@ -1,14 +1,7 @@
+-# FH6 Radio Tool v3.0.33
++# FH6 Radio Tool v3.0.34 Hotfix
+ 
+-## Main-menu music workflow simplification
+-
+-- Changed the main-menu / press-start music replacement workflow to use the known FH6 bank automatically: `GLB_RadioPressStart.assets.bank`.
+-- Users no longer need to manually choose or auto-detect the menu music bank.
+-- Users only need to select the replacement audio file; the tool resolves the bank from the selected game root / `media/Audio/FMODBanks` directory.
+-- The workflow replaces the single music entry in that bank, then generates a package or performs one-click replacement with backup.
+-- Radio station replacement and RadioInfo XML patching remain separate and unchanged.
+-
+-## Previous v3 fixes kept
+-
+-- Keeps the v3.0.31 manifest fix for `rebuilt_files` in package-only workflows.
+-- Keeps the Nuitka build workflow and Nexus-oriented source/package layout.
++- Fixed the v3.0.33 portable EXE prompt that incorrectly told users to run `setup_env.bat` for missing `pywinauto`.
++- In the Nexus/Nuitka EXE package, `setup_env.bat` is intentionally not present; running an old v2 setup script cannot repair a compiled EXE.
++- The Nuitka builder now verifies Windows automation dependencies before building and includes `pywinauto`, `comtypes`, `win32com`, and Win32 modules more explicitly.
++- The Nexus package builder no longer copies a separate `ffmpeg.exe` into the final upload ZIP by default.
++- Main-menu music replacement remains fixed to `GLB_RadioPressStart.assets.bank`; users only select the replacement audio.
+diff -ru orig/FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/build_nuitka_release.bat FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/build_nuitka_release.bat
+--- orig/FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/build_nuitka_release.bat	2026-05-23 13:19:10.000000000 +0000
++++ FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/build_nuitka_release.bat	2026-05-23 15:09:04.233105717 +0000
+@@ -44,7 +44,7 @@
+ echo [2/5] Installing / updating Nuitka build dependencies ...
+ "%PY%" -m pip install -U pip
+ "%PY%" -m pip install -U -r requirements.txt
+-"%PY%" -m pip install -U nuitka ordered-set zstandard
++"%PY%" -m pip install -U nuitka ordered-set zstandard pywinauto pywin32 comtypes six
+ if errorlevel 1 (
+   echo [ERROR] Failed to install build dependencies.
+   pause
+diff -ru orig/FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/fh6_radio_tool/__init__.py FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/fh6_radio_tool/__init__.py
+--- orig/FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/fh6_radio_tool/__init__.py	2026-05-23 14:43:19.000000000 +0000
++++ FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/fh6_radio_tool/__init__.py	2026-05-23 15:09:04.224056218 +0000
+@@ -1 +1 @@
+-__version__ = "3.0.33"
++__version__ = "3.0.34"
+Only in FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/fh6_radio_tool: __pycache__
+diff -ru orig/FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/fh6_radio_tool/fmod_automation.py FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/fh6_radio_tool/fmod_automation.py
+--- orig/FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/fh6_radio_tool/fmod_automation.py	2026-05-23 13:08:54.000000000 +0000
++++ FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/fh6_radio_tool/fmod_automation.py	2026-05-23 15:09:04.226457042 +0000
+@@ -20,6 +20,8 @@
+ from pathlib import Path
+ from typing import Iterable
+ 
++from .runtime_tools import is_frozen_app
++
+ 
+ @dataclass(frozen=True)
+ class FmodToolLayout:
+@@ -58,15 +60,46 @@
+ 
+ 
+ 
+-def is_pywinauto_available() -> bool:
+-    """Return whether optional pywinauto GUI automation is importable."""
++def pywinauto_status() -> tuple[bool, str]:
++    """Return whether pywinauto GUI automation is importable, plus detail for diagnostics.
++
++    v3.0.34: packaged EXE builds must carry this dependency inside the EXE.
++    Telling end users to run setup_env.bat is wrong for the Nexus/Nuitka portable
++    package because the final ZIP intentionally does not include batch installers.
++    """
+     try:
+         with warnings.catch_warnings():
+             warnings.simplefilter("ignore")
+-            import pywinauto  # type: ignore  # noqa: F401
+-        return True
+-    except Exception:
+-        return False
++            import pywinauto  # type: ignore
++            from pywinauto import Application  # type: ignore  # noqa: F401
++            from pywinauto.keyboard import send_keys  # type: ignore  # noqa: F401
++        version = getattr(pywinauto, "__version__", "unknown")
++        return True, f"pywinauto OK, version={version}"
++    except Exception as exc:
++        return False, f"{type(exc).__name__}: {exc}"
++
++
++def is_pywinauto_available() -> bool:
++    """Return whether optional pywinauto GUI automation is importable."""
++    return pywinauto_status()[0]
++
++
++def pywinauto_user_hint() -> str:
++    ok, detail = pywinauto_status()
++    if ok:
++        return detail
++    if is_frozen_app():
++        return (
++            f"自动控制组件不可用：{detail}。"
++            "当前是便携 EXE/Nuitka 包，包内不包含 setup_env.bat；"
++            "运行旧版 v2 的 setup_env.bat 也不会修改这个 EXE。"
++            "请改用 v3.0.34 或更新版本重新打包/下载。"
++        )
++    return (
++        f"自动控制组件不可用：{detail}。"
++        "请运行当前 v3 源码包自带的 setup_env.bat 安装依赖；"
++        "不要使用 v2 旧包里的 setup_env.bat。"
++    )
+ 
+ def layout_from_exe(exe_path: Path) -> FmodToolLayout:
+     exe_path = Path(exe_path)
+@@ -522,7 +555,7 @@
+             from pywinauto import Application  # type: ignore
+             from pywinauto.keyboard import send_keys  # type: ignore
+     except Exception:
+-        return False, "未安装 pywinauto；已启动 Fmod Bank Tools，请在其界面手动点击 Extract/Rebuild。"
++        return False, pywinauto_user_hint() + " 已启动 Fmod Bank Tools，请在其界面手动点击 Extract/Rebuild。"
+ 
+     deadline = time.time() + timeout_sec
+     last_error = ""
+@@ -1038,7 +1071,7 @@
+                 return FmodAutomationResult(
+                     False,
+                     action,
+-                    message + " 一键流程需要自动点击成功；请运行安装环境.bat 安装 pywinauto 后重试。",
++                    message + " 一键流程需要自动点击成功；" + pywinauto_user_hint(),
+                     layout,
+                     None,
+                     proc.pid,
+@@ -1048,7 +1081,7 @@
+             return FmodAutomationResult(
+                 False,
+                 action,
+-                message + " 一键流程未启用自动点击，因此已停止等待。请启用自动控制或安装 pywinauto。",
++                message + " 一键流程未启用自动点击，因此已停止等待。请保持自动控制勾选；" + pywinauto_user_hint(),
+                 layout,
+                 None,
+                 proc.pid,
+diff -ru orig/FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/fh6_radio_tool/v2_state_store.py FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/fh6_radio_tool/v2_state_store.py
+--- orig/FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/fh6_radio_tool/v2_state_store.py	2026-05-23 14:43:19.000000000 +0000
++++ FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/fh6_radio_tool/v2_state_store.py	2026-05-23 15:09:04.225076018 +0000
+@@ -9,7 +9,7 @@
+ 
+ from .runtime_tools import runtime_root
+ 
+-APP_VERSION = "3.0.33"
++APP_VERSION = "3.0.34"
+ DB_FILE_NAME = "fh6_radio_tool_v2.sqlite3"
+ 
+ 
+diff -ru orig/FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/fh6_radio_tool/v2_ui.py FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/fh6_radio_tool/v2_ui.py
+--- orig/FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/fh6_radio_tool/v2_ui.py	2026-05-23 14:43:17.000000000 +0000
++++ FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/fh6_radio_tool/v2_ui.py	2026-05-23 15:09:24.885448874 +0000
+@@ -41,7 +41,7 @@
+ from .loop_engine.scene_preview import build_scene_preview_plan
+ from .fmod_automation import (
+     collect_rebuilt_banks as fmod_collect_rebuilt_banks,
+-    bank_contains_fsb_audio, bank_preflight_message, is_pywinauto_available,
++    bank_contains_fsb_audio, bank_preflight_message, is_pywinauto_available, pywinauto_status,
+     launch_and_optionally_trigger, launch_trigger_and_wait, layout_from_exe,
+     prepare_extract_job, prepare_rebuild_job, copy_banks_to_tool_bank_dir,
+ )
+@@ -50,7 +50,7 @@
+ from .wav_preview_player import WavPreviewPlayer
+ from .wav_tools import list_audio_candidates, natural_key, read_wav_info, validate_wav
+ from .xml_tools import find_station, get_track_samples, list_station_infos, parse_xml, station_info_from_node, write_xml
+-from .runtime_tools import runtime_root, bundled_resource_root
++from .runtime_tools import runtime_root, bundled_resource_root, is_frozen_app
+ 
+ 
+ # Temporary station-slot profile data derived from the full-radio developer
+@@ -368,7 +368,7 @@
+         self.bank_root_edit.setReadOnly(True)
+         self.bank_root_edit.setPlaceholderText("扫描游戏根目录后自动定位 media/Audio/FMODBanks")
+         self.fmod_tool_edit = QLineEdit(str(self.store.get_setting("fmod_tool", "")))
+-        self.auto_fmod_click_check = QCheckBox("自动控制 Fmod Bank Tools（推荐；安装环境会自动安装 pywinauto）")
++        self.auto_fmod_click_check = QCheckBox("自动控制 Fmod Bank Tools（推荐；用于一键 Extract/Rebuild）")
+         self.auto_fmod_click_check.setChecked(bool(self.store.get_setting("fmod_auto_click", True)))
+ 
+         # v3.0.33: optional main-menu / press-start music replacement workflow.
+@@ -1270,8 +1270,8 @@
+         self.update_log_toggle_text()
+         if hasattr(self, 'auto_fmod_click_check'):
+             self.auto_fmod_click_check.setText(
+-                "Auto-control Fmod Bank Tools (recommended; setup installs pywinauto)" if en
+-                else "自动控制 Fmod Bank Tools（推荐；安装环境会自动安装 pywinauto）"
++                "Auto-control Fmod Bank Tools (recommended for one-click Extract/Rebuild)" if en
++                else "自动控制 Fmod Bank Tools（推荐；用于一键 Extract/Rebuild）"
+             )
+         self.slot_table.setHorizontalHeaderLabels(
+             ["Replace\nAll", "Slot", "Original", "Artist", "SoundName", "SampleLength", "SampleRate", "Assigned music", "Markers", "Status"]
+@@ -1346,6 +1346,44 @@
+             return en if en is not None else zh
+         return zh
+ 
++    def automation_component_warning_text(self, context_zh: str, context_en: str) -> tuple[str, str]:
++        """User-facing message when pywinauto is unavailable.
++
++        v3.0.34 fixes the misleading v3.0.33 prompt that asked Nexus EXE users
++        to run setup_env.bat even though the portable package intentionally does
++        not contain setup_env.bat.
++        """
++        ok, detail = pywinauto_status()
++        if ok:
++            return "", ""
++        if is_frozen_app():
++            zh = (
++                f"{context_zh}需要自动控制 Fmod Bank Tools。\n\n"
++                f"当前便携 EXE 内置的自动控制组件不可用：{detail}\n\n"
++                "这个 Nexus/便携 EXE 包不会包含 setup_env.bat；运行 v2 旧版 setup_env.bat 也不会修复当前 EXE。\n"
++                "请使用 v3.0.34 或更新版本重新下载/重新打包。"
++            )
++            en = (
++                f"{context_en} requires automatic control of Fmod Bank Tools.\n\n"
++                f"The automation component bundled in this portable EXE is not available: {detail}\n\n"
++                "This Nexus/portable EXE package does not include setup_env.bat, and running an old v2 setup_env.bat will not repair the current EXE.\n"
++                "Please use v3.0.34 or a newer rebuilt package."
++            )
++        else:
++            zh = (
++                f"{context_zh}需要自动控制 Fmod Bank Tools。\n\n"
++                f"当前 Python 环境缺少自动控制组件：{detail}\n\n"
++                "请运行当前 v3 源码包自带的 setup_env.bat 安装 pywinauto；不要使用 v2 旧包里的 setup_env.bat。\n"
++                "安装后重新启动工具，并保持“自动控制 Fmod Bank Tools”处于勾选状态。"
++            )
++            en = (
++                f"{context_en} requires automatic control of Fmod Bank Tools.\n\n"
++                f"The current Python environment is missing the automation component: {detail}\n\n"
++                "Run the setup_env.bat from the current v3 source package, not an old v2 package.\n"
++                "Then restart the tool and keep Auto control Fmod Bank Tools checked."
++            )
++        return zh, en
++
+     def _rough_runtime_translate(self, text: str) -> str:
+         """Small runtime/log translator for common messages.
+ 
+@@ -5219,12 +5257,11 @@
+             return
+ 
+         if not auto_click or not is_pywinauto_available():
+-            self.warn_box(
+-                "需要自动控制组件",
+-                "主菜单音乐替换需要自动控制 Fmod Bank Tools。请先运行“安装环境.bat”安装 pywinauto，\n并保持“自动控制 Fmod Bank Tools”处于勾选状态。",
+-                "Automation component required",
+-                "Main-menu music replacement requires automatic control of Fmod Bank Tools. Please run setup_env.bat to install pywinauto,\nand keep Auto control Fmod Bank Tools checked.",
+-            )
++            msg_zh, msg_en = self.automation_component_warning_text("主菜单音乐替换", "Main-menu music replacement")
++            if not auto_click:
++                msg_zh = "请先勾选“自动控制 Fmod Bank Tools”。\n\n" + msg_zh
++                msg_en = "Please check Auto control Fmod Bank Tools first.\n\n" + msg_en
++            self.warn_box("需要自动控制组件", msg_zh, "Automation component required", msg_en)
+             return
+ 
+         mode_text = f"自动替换 {MAIN_MENU_PRESS_START_BANK} 内唯一音乐音频"
+@@ -5377,14 +5414,11 @@
+             return
+ 
+         if not auto_click or not is_pywinauto_available():
+-            self.warn_box(
+-                "需要自动控制组件",
+-                "生成完整 Mod 输出包需要自动控制 Fmod Bank Tools。请先运行“安装环境.bat”安装 pywinauto，\n"
+-                "并保持“自动控制 Fmod Bank Tools”处于勾选状态。",
+-                "Automation component required",
+-                "Generating a complete mod output package requires automatic control of Fmod Bank Tools. Please run setup_env.bat to install pywinauto,\n"
+-                "and keep Auto control Fmod Bank Tools checked.",
+-            )
++            msg_zh, msg_en = self.automation_component_warning_text("生成完整 Mod 输出包", "Generating a complete mod output package")
++            if not auto_click:
++                msg_zh = "请先勾选“自动控制 Fmod Bank Tools”。\n\n" + msg_zh
++                msg_en = "Please check Auto control Fmod Bank Tools first.\n\n" + msg_en
++            self.warn_box("需要自动控制组件", msg_zh, "Automation component required", msg_en)
+             return
+ 
+         bank_list = "\n".join(f"- {p}" for p in banks)
+@@ -5509,14 +5543,11 @@
+             return
+ 
+         if not auto_click or not is_pywinauto_available():
+-            self.warn_box(
+-                "需要自动控制组件",
+-                "一键替换需要自动控制 Fmod Bank Tools。请先运行“安装环境.bat”安装 pywinauto，\n"
+-                "并保持“自动控制 Fmod Bank Tools”处于勾选状态。这样可以避免外部工具停在 No bank files found 或等待状态。",
+-                "Automation component required",
+-                "One-click replacement requires automatic control of Fmod Bank Tools. Please run setup_env.bat to install pywinauto,\n"
+-                "and keep Auto control Fmod Bank Tools checked. This avoids the external tool stopping at No bank files found or waiting state.",
+-            )
++            msg_zh, msg_en = self.automation_component_warning_text("一键替换", "One-click replacement")
++            if not auto_click:
++                msg_zh = "请先勾选“自动控制 Fmod Bank Tools”。\n\n" + msg_zh
++                msg_en = "Please check Auto control Fmod Bank Tools first.\n\n" + msg_en
++            self.warn_box("需要自动控制组件", msg_zh, "Automation component required", msg_en)
+             return
+ 
+         bank_list = "\n".join(f"- {p}" for p in banks)
+Only in FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/scripts: __pycache__
+diff -ru orig/FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/scripts/build_nuitka_release.py FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/scripts/build_nuitka_release.py
+--- orig/FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/scripts/build_nuitka_release.py	2026-05-23 13:19:10.000000000 +0000
++++ FH6_Radio_Tool_v3_0_33_pressstart_fixed_bank_nuitka_builder/scripts/build_nuitka_release.py	2026-05-23 15:09:04.232758368 +0000
+@@ -19,13 +19,14 @@
+ APP_ICON_B64 = PROJECT_ROOT / "resources" / "app_icon_base64.txt"
+ ARCHIVE_EXTENSIONS = {".zip", ".7z", ".rar", ".tar", ".gz", ".tgz", ".bz2", ".tbz", ".xz", ".cab", ".iso"}
+ 
+-# Modules imported lazily by the app or by Windows automation dependencies.
+-# They are included only when importable in the active Windows venv.
+-OPTIONAL_INCLUDE_MODULES = [
++# v3.0.34: automatic Fmod Bank Tools control is a required feature for the
++# portable EXE.  Do not treat pywinauto as a vague optional import, otherwise a
++# build can succeed but users will see a misleading setup_env.bat prompt in a
++# Nexus package that intentionally has no setup_env.bat.
++REQUIRED_WINDOWS_AUTOMATION_IMPORTS = [
+     "pywinauto",
+     "pywinauto.application",
+     "pywinauto.keyboard",
+-    "pywinauto.controls.uiawrapper",
+     "comtypes",
+     "comtypes.client",
+     "pythoncom",
+@@ -36,6 +37,26 @@
+     "win32process",
+ ]
+ 
++NUITKA_INCLUDE_PACKAGES = [
++    "pywinauto",
++    "comtypes",
++    "win32com",
++    "win32comext",
++]
++
++NUITKA_INCLUDE_MODULES = [
++    "six",
++    "pythoncom",
++    "pywintypes",
++    "win32api",
++    "win32con",
++    "win32gui",
++    "win32process",
++    "pywinauto.application",
++    "pywinauto.keyboard",
++    "pywinauto.controls.uiawrapper",
++]
++
+ REQUIRED_QT_MODULES = [
+     "PySide6",
+     "PySide6.QtCore",
+@@ -130,16 +151,16 @@
+ 2. Fmod Bank Tools 不会被内置；请在工具设置里选择你自己的 Fmod_Bank_Tools.exe。
+ 3. output、backup、work 会生成在 FH6RadioTool.exe 同目录。
+ 4. 本包不包含 loose .ico、游戏文件、音乐文件、bank 文件或源码目录。
+-5. 如果安全软件拦截，请把本文件夹加入信任后重新解压。
+-6. 如果 EXE 版异常，仍可回到源码包使用 setup_env.bat + run_tool.bat。
++5. 本 EXE 已内置自动控制依赖；用户不需要、也不能通过旧版 setup_env.bat 修复此 EXE。
++6. 如果自动控制仍提示缺失，请下载 v3.0.34 或更新版本重新打包。
+ 
+ English:
+ 1. Double-click FH6RadioTool.exe to start. Python setup is not required.
+ 2. Fmod Bank Tools is not bundled; select your own Fmod_Bank_Tools.exe in settings.
+ 3. output, backup and work are created next to FH6RadioTool.exe.
+ 4. This package contains no loose .ico files, game files, music files, bank files or source folder.
+-5. If antivirus blocks the app, add this folder to trusted locations and extract again.
+-6. If this EXE build has issues, use the source/batch package as fallback.
++5. This EXE should include the automation dependencies; users do not need and cannot repair it with an old setup_env.bat.
++6. If automation is still reported missing, rebuild/download v3.0.34 or newer.
+ """
+     (bundle_dir / "README_NUITKA_PORTABLE.txt").write_text(text, encoding="utf-8")
+ 
+@@ -176,12 +197,35 @@
+         raise RuntimeError("Invalid EXE package: loose .ico file(s) found: " + ", ".join(rels))
+ 
+ 
+-def add_if_importable(cmd: list[str], module: str) -> None:
++def importable(module: str) -> bool:
+     try:
+-        if importlib.util.find_spec(module) is not None:
+-            cmd.append(f"--include-module={module}")
++        return importlib.util.find_spec(module) is not None
+     except Exception:
+-        pass
++        return False
++
++
++def add_module_if_importable(cmd: list[str], module: str) -> None:
++    if importable(module):
++        cmd.append(f"--include-module={module}")
++
++
++def add_package_if_importable(cmd: list[str], package: str) -> None:
++    if importable(package):
++        cmd.append(f"--include-package={package}")
++
++
++def verify_windows_automation_imports() -> None:
++    missing: list[str] = []
++    for mod in REQUIRED_WINDOWS_AUTOMATION_IMPORTS:
++        if not importable(mod):
++            missing.append(mod)
++    if missing:
++        raise RuntimeError(
++            "Windows automation dependencies are missing: " + ", ".join(missing) +
++            ". Run build_nuitka_release.bat again from the v3.0.34 project root. "
++            "Do not reuse an old v2 setup_env.bat or an old virtualenv."
++        )
++    run([sys.executable, "-c", "from pywinauto import Application; from pywinauto.keyboard import send_keys; import pythoncom, pywintypes, win32gui; print('pywinauto runtime check OK')"])
+ 
+ 
+ def main() -> int:
+@@ -196,7 +240,10 @@
+             "Nuitka cannot cross-compile a Windows .exe from Linux/WSL in this project."
+         )
+ 
+-    log("[2/10] Checking entry files ...")
++    log("[2/10] Checking Windows automation dependencies ...")
++    verify_windows_automation_imports()
++
++    log("[3/10] Checking entry files ...")
+     if not ENTRY.exists():
+         ENTRY.write_text('from fh6_radio_tool.v2_ui import main\n\nif __name__ == "__main__":\n    raise SystemExit(main())\n', encoding="utf-8")
+     for rel in ["fh6_radio_tool/app.py", "fh6_radio_tool/v2_ui.py", "requirements.txt"]:
+@@ -204,20 +251,20 @@
+             raise RuntimeError(f"Missing required file: {rel}")
+     ensure_build_icon()
+ 
+-    log("[3/10] Python syntax check ...")
++    log("[4/10] Python syntax check ...")
+     ok = compileall.compile_dir(str(PROJECT_ROOT / "fh6_radio_tool"), quiet=1, force=False)
+     ok = bool(ok and compileall.compile_file(str(ENTRY), quiet=1, force=False))
+     remove_py_caches(PROJECT_ROOT / "fh6_radio_tool")
+     if not ok:
+         raise RuntimeError("compileall failed")
+ 
+-    log("[4/10] Cleaning previous Nuitka outputs ...")
++    log("[5/10] Cleaning previous Nuitka outputs ...")
+     shutil.rmtree(NUITKA_WORK, ignore_errors=True)
+     shutil.rmtree(NUITKA_OUT, ignore_errors=True)
+     DIST_ROOT.mkdir(parents=True, exist_ok=True)
+     ensure_build_icon()
+ 
+-    log("[5/10] Running Nuitka Windows onefile build ...")
++    log("[6/10] Running Nuitka Windows onefile build ...")
+     py = sys.executable
+     cmd = [
+         py,
+@@ -240,8 +287,10 @@
+     ]
+     for module in REQUIRED_QT_MODULES:
+         cmd.append(f"--include-module={module}")
+-    for module in OPTIONAL_INCLUDE_MODULES:
+-        add_if_importable(cmd, module)
++    for package in NUITKA_INCLUDE_PACKAGES:
++        add_package_if_importable(cmd, package)
++    for module in NUITKA_INCLUDE_MODULES:
++        add_module_if_importable(cmd, module)
+     cmd.append(str(ENTRY))
+ 
+     env = os.environ.copy()
+@@ -257,26 +306,27 @@
+         # semantics differ across versions; fail loudly rather than guessing.
+         raise RuntimeError(f"Nuitka onefile output not found: {onefile_exe}")
+ 
+-    log("[6/10] Creating Nexus-safe portable folder without loose ICO/source files ...")
++    log("[7/10] Creating Nexus-safe portable folder without loose ICO/source files ...")
+     package_name = f"FH6_Radio_Tool_v{version}_nexus_nuitka_onefile"
+     stage_root = DIST_ROOT / "_nuitka_stage"
+     package_dir = stage_root / package_name
+     shutil.rmtree(stage_root, ignore_errors=True)
+     package_dir.mkdir(parents=True, exist_ok=True)
+     shutil.copy2(onefile_exe, package_dir / "FH6RadioTool.exe")
+-    copy_ffmpeg_to_bundle(package_dir)
++    # v3.0.34: do not bundle a separate ffmpeg.exe in the Nexus package.
++    # The app can use imageio-ffmpeg from the bundled Python package or a user-provided PATH/tool.
+     if (PROJECT_ROOT / "config").exists():
+         shutil.copytree(PROJECT_ROOT / "config", package_dir / "config")
+     write_exe_readme(package_dir, version)
+ 
+-    log("[7/10] Verifying Nexus-safe package folder ...")
++    log("[8/10] Verifying Nexus-safe package folder ...")
+     verify_nexus_package_dir(package_dir)
+ 
+-    log("[8/10] Creating Nexus-safe Nuitka ZIP ...")
++    log("[9/10] Creating Nexus-safe Nuitka ZIP ...")
+     zip_path = DIST_ROOT / f"{package_name}.zip"
+     make_zip(package_dir, zip_path, package_name)
+ 
+-    log("[9/10] Verifying ZIP ...")
++    log("[10/10] Verifying ZIP ...")
+     with zipfile.ZipFile(zip_path, "r") as zf:
+         names = zf.namelist()
+         if not any(n.endswith("FH6RadioTool.exe") for n in names):
+@@ -289,7 +339,7 @@
+             raise RuntimeError("ZIP verification failed: source package folder found")
+         log(f"      Files in ZIP: {sum(1 for n in names if not n.endswith('/'))}")
+ 
+-    log("[10/10] Done.")
++    log("[11/11] Done.")
+     log("")
+     log("[OK] Nexus-safe Nuitka onefile portable package created:")
+     log(f"     {zip_path}")
