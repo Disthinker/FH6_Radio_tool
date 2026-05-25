@@ -145,14 +145,14 @@ def write_exe_readme(bundle_dir: Path, version: str) -> None:
 1. 双击 FH6RadioTool.exe 启动工具，不需要先运行 setup_env.bat。
 2. Fmod Bank Tools 仍然不会内置；请在工具设置里选择你自己的 Fmod_Bank_Tools.exe。
 3. output、backup、work 会生成在 FH6RadioTool.exe 同目录。
-4. v3.0.38 已内置 Win32 fallback；如果 pywinauto/comtypes 异常，仍会尝试自动控制 Fmod Bank Tools。
+4. v3.0.39 已内置 Win32 fallback 和开发者模式；如果 pywinauto/comtypes 异常，仍会尝试自动控制 Fmod Bank Tools。
 5. 如果 EXE 版异常，仍可回到源码包使用 setup_env.bat + run_tool.bat。
 
 English:
 1. Double-click FH6RadioTool.exe to start. Python setup is not required.
 2. Fmod Bank Tools is still external; select your own Fmod_Bank_Tools.exe in settings.
 3. output, backup and work are created next to FH6RadioTool.exe.
-4. v3.0.38 includes a Win32 fallback; if pywinauto/comtypes is broken, it can still try to control Fmod Bank Tools.
+4. v3.0.39 includes a Win32 fallback and developer mode; if pywinauto/comtypes is broken, it can still try to control Fmod Bank Tools.
 5. If this EXE build has issues, use the source/batch package as fallback.
 """
     (bundle_dir / "README_EXE_PORTABLE.txt").write_text(text, encoding="utf-8")

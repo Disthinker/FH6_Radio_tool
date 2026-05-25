@@ -1,0 +1,267 @@
+diff -ruN '--exclude=__pycache__' /mnt/data/fh6_v3040_orig/FH6_Radio_Tool_v3_0_40_ui_slot_i18n_builder/README.md /mnt/data/fh6_v310_work/README.md
+--- /mnt/data/fh6_v3040_orig/FH6_Radio_Tool_v3_0_40_ui_slot_i18n_builder/README.md	2026-05-25 03:01:42.000000000 +0000
++++ /mnt/data/fh6_v310_work/README.md	2026-05-25 03:10:21.545659044 +0000
+@@ -1,3 +1,9 @@
++# FH6 Radio Tool
++
++### v3.1.0 Release candidate
++
++- 修复 Fmod Bank Tools 线程数没有跟随开发者模式最大线程设置的问题。
++
+ 
+ ## v3.0.27 正式版整理 / Release cleanup
+ 
+diff -ruN '--exclude=__pycache__' /mnt/data/fh6_v3040_orig/FH6_Radio_Tool_v3_0_40_ui_slot_i18n_builder/RELEASE_NOTES.md /mnt/data/fh6_v310_work/RELEASE_NOTES.md
+--- /mnt/data/fh6_v3040_orig/FH6_Radio_Tool_v3_0_40_ui_slot_i18n_builder/RELEASE_NOTES.md	2026-05-25 03:01:42.000000000 +0000
++++ /mnt/data/fh6_v310_work/RELEASE_NOTES.md	2026-05-25 03:10:21.545214079 +0000
+@@ -1,3 +1,9 @@
++## v3.1.0
++
++- Release candidate for developer mode and main tool workflow.
++- Fixed Fmod Bank Tools CPU thread setting: the user-selected maximum thread count is now written into `config.ini` for Extract and Rebuild jobs instead of always falling back to 2.
++- The same thread limit is used by developer-mode precheck/statistics stages and by external Fmod Bank Tools encoding/rebuild stages, while Fmod GUI launches remain serial for stability.
++
+ ## v3.0.40
+ 
+ - Fix station combo slot-count display so it uses the same visible/replaceable slot filtering as the actual slot table. This fixes cases such as a station label showing 29 slots while the table exposes only 27 replaceable rows.
+diff -ruN '--exclude=__pycache__' /mnt/data/fh6_v3040_orig/FH6_Radio_Tool_v3_0_40_ui_slot_i18n_builder/build_pyinstaller_release.bat /mnt/data/fh6_v310_work/build_pyinstaller_release.bat
+--- /mnt/data/fh6_v3040_orig/FH6_Radio_Tool_v3_0_40_ui_slot_i18n_builder/build_pyinstaller_release.bat	2026-05-23 16:27:10.000000000 +0000
++++ /mnt/data/fh6_v310_work/build_pyinstaller_release.bat	2026-05-25 03:10:21.545909073 +0000
+@@ -12,7 +12,7 @@
+ echo   dist_release\FH6_Radio_Tool_v*_nexus_exe_portable.zip
+ echo.
+ echo Notes:
+-echo   - This is the recommended builder for v3.0.38.
++echo   - This is the recommended builder for v3.1.0.
+ echo   - Run this on native Windows, not WSL/Linux.
+ echo   - Fmod Bank Tools is NOT bundled. Players select their own exe.
+ echo   - The final ZIP contains no loose .ico, source folder, or nested archive.
+diff -ruN '--exclude=__pycache__' /mnt/data/fh6_v3040_orig/FH6_Radio_Tool_v3_0_40_ui_slot_i18n_builder/fh6_radio_tool/__init__.py /mnt/data/fh6_v310_work/fh6_radio_tool/__init__.py
+--- /mnt/data/fh6_v3040_orig/FH6_Radio_Tool_v3_0_40_ui_slot_i18n_builder/fh6_radio_tool/__init__.py	2026-05-25 03:01:07.000000000 +0000
++++ /mnt/data/fh6_v310_work/fh6_radio_tool/__init__.py	2026-05-25 03:10:21.544385804 +0000
+@@ -1 +1 @@
+-__version__ = "3.0.40"
++__version__ = "3.1.0"
+diff -ruN '--exclude=__pycache__' /mnt/data/fh6_v3040_orig/FH6_Radio_Tool_v3_0_40_ui_slot_i18n_builder/fh6_radio_tool/fmod_automation.py /mnt/data/fh6_v310_work/fh6_radio_tool/fmod_automation.py
+--- /mnt/data/fh6_v3040_orig/FH6_Radio_Tool_v3_0_40_ui_slot_i18n_builder/fh6_radio_tool/fmod_automation.py	2026-05-23 16:27:52.000000000 +0000
++++ /mnt/data/fh6_v310_work/fh6_radio_tool/fmod_automation.py	2026-05-25 03:10:21.538462299 +0000
+@@ -256,12 +256,24 @@
+     return Path(path).as_posix()
+ 
+ 
++def _clamp_cpu_threads(value: int | None) -> int:
++    try:
++        logical = max(1, int(os.cpu_count() or 1))
++    except Exception:
++        logical = 1
++    try:
++        requested = int(value if value is not None else logical)
++    except Exception:
++        requested = logical
++    return max(1, min(logical, requested))
++
++
+ def write_config_ini(
+     layout: FmodToolLayout,
+     *,
+     format_name: str = "vorbis",
+     quality: int = 75,
+-    cpu_threads: int = 2,
++    cpu_threads: int | None = None,
+     default_settings: bool = True,
+     encode_sync_point: bool = True,
+     looping: bool = True,
+@@ -279,7 +291,7 @@
+         "[Options]",
+         f"Format={format_name}",
+         f"Quality={int(quality)}",
+-        f"CPUThreads={int(cpu_threads)}",
++        f"CPUThreads={_clamp_cpu_threads(cpu_threads)}",
+         f"DefaultSettings={_bool_text(default_settings)}",
+         f"EncodeSyncPoint={_bool_text(encode_sync_point)}",
+         f"Looping={_bool_text(looping)}",
+@@ -910,9 +922,10 @@
+     clean_bank_dir: bool = True,
+     search_root: Path | None = None,
+     preferred_tokens: Iterable[str] | None = None,
++    cpu_threads: int | None = None,
+ ) -> FmodAutomationResult:
+     layout = layout_from_exe(exe_path)
+-    write_config_ini(layout)
++    write_config_ini(layout, cpu_threads=cpu_threads)
+     # Clean previous outputs so one-click waiting cannot falsely succeed on stale files.
+     _clean_directory(layout.wav_dir)
+     _clean_directory(layout.fsb_dir)
+@@ -1002,6 +1015,7 @@
+         "cu1_preflight_warnings": cu1_preflight_warnings,
+         "bank_preflight": [bank_preflight_message(p) for p in requested],
+         "preferred_station_tokens": [str(t) for t in (preferred_tokens or [])],
++        "cpu_threads": _clamp_cpu_threads(cpu_threads),
+         "tool_root_dir": str(layout.root_dir),
+         "launch_cwd": str(layout.root_dir),
+         "config_path": str(layout.config_path),
+@@ -1018,9 +1032,9 @@
+     return FmodAutomationResult(True, "extract_prepare", msg, layout, manifest, None, copied)
+ 
+ 
+-def prepare_rebuild_job(exe_path: Path, wav_workspace: Path, manifest_path: Path, *, clean_wav_dir: bool = True) -> FmodAutomationResult:
++def prepare_rebuild_job(exe_path: Path, wav_workspace: Path, manifest_path: Path, *, clean_wav_dir: bool = True, cpu_threads: int | None = None) -> FmodAutomationResult:
+     layout = layout_from_exe(exe_path)
+-    write_config_ini(layout)
++    write_config_ini(layout, cpu_threads=cpu_threads)
+     # Clean previous build output so deploy never uses stale .bank files.  Use
+     # retry + verification because Windows may keep files locked when the user
+     # left Fmod Bank Tools open from a previous run.
+@@ -1036,6 +1050,7 @@
+         "wav_workspace": str(wav_workspace),
+         "tool_wav_dir": str(wav_dir),
+         "rebuild_dir_cleaned": True,
++        "cpu_threads": _clamp_cpu_threads(cpu_threads),
+         "stale_build_files_blocked": [],
+     })
+     return FmodAutomationResult(True, "rebuild_prepare", f"已准备 Rebuild wav 工作区：{wav_dir}；旧 build 输出已清理。", layout, manifest, None, [wav_dir])
+diff -ruN '--exclude=__pycache__' /mnt/data/fh6_v3040_orig/FH6_Radio_Tool_v3_0_40_ui_slot_i18n_builder/fh6_radio_tool/v2_state_store.py /mnt/data/fh6_v310_work/fh6_radio_tool/v2_state_store.py
+--- /mnt/data/fh6_v3040_orig/FH6_Radio_Tool_v3_0_40_ui_slot_i18n_builder/fh6_radio_tool/v2_state_store.py	2026-05-25 03:01:07.000000000 +0000
++++ /mnt/data/fh6_v310_work/fh6_radio_tool/v2_state_store.py	2026-05-25 03:10:21.544932749 +0000
+@@ -9,7 +9,7 @@
+ 
+ from .runtime_tools import runtime_root
+ 
+-APP_VERSION = "3.0.40"
++APP_VERSION = "3.1.0"
+ DB_FILE_NAME = "fh6_radio_tool_v2.sqlite3"
+ 
+ 
+diff -ruN '--exclude=__pycache__' /mnt/data/fh6_v3040_orig/FH6_Radio_Tool_v3_0_40_ui_slot_i18n_builder/fh6_radio_tool/v2_ui.py /mnt/data/fh6_v310_work/fh6_radio_tool/v2_ui.py
+--- /mnt/data/fh6_v3040_orig/FH6_Radio_Tool_v3_0_40_ui_slot_i18n_builder/fh6_radio_tool/v2_ui.py	2026-05-25 03:01:21.000000000 +0000
++++ /mnt/data/fh6_v310_work/fh6_radio_tool/v2_ui.py	2026-05-25 03:10:56.084517008 +0000
+@@ -716,8 +716,8 @@
+         safe = recommended_safe_thread_count()
+         current = self._dev_max_threads() if hasattr(self, "dev_thread_spin") else safe
+         if self.ui_lang() == "en":
+-            return f"Local logical threads: {logical}; recommended safe limit: {safe}; developer tasks will use at most: {current}. Fmod GUI stages are kept serial to avoid opening multiple Bank Tools instances."
+-        return f"本机逻辑线程: {logical}；建议安全上限: {safe}；当前开发任务最多使用: {current}。Fmod GUI 阶段会自动串行，避免同时打开多个 Bank Tools。"
++            return f"Local logical threads: {logical}; recommended safe limit: {safe}; developer tasks and Fmod Bank Tools CPUThreads will use at most: {current}. Fmod GUI launches are kept serial to avoid opening multiple Bank Tools instances."
++        return f"本机逻辑线程: {logical}；建议安全上限: {safe}；当前开发任务和 Fmod Bank Tools CPUThreads 最多使用: {current}。Fmod GUI 启动会自动串行，避免同时打开多个 Bank Tools。"
+ 
+     def _dev_max_threads(self) -> int:
+         try:
+@@ -726,6 +726,10 @@
+             value = int(self.store.get_setting("dev_max_threads", recommended_safe_thread_count()) or recommended_safe_thread_count())
+         return max(1, min(local_logical_cpu_count(), value))
+ 
++    def _fmod_cpu_threads(self) -> int:
++        """Thread limit used for external Fmod Bank Tools config.ini."""
++        return self._dev_max_threads()
++
+     def on_dev_thread_count_changed(self, value: int) -> None:
+         value = max(1, min(local_logical_cpu_count(), int(value)))
+         self.store.set_setting("dev_max_threads", value)
+@@ -3588,7 +3592,7 @@
+         banks = self._selected_bank_paths_for_current_station()
+         station_tokens = self._station_bank_tokens()
+         manifest = self._fmod_auto_dir() / "extract_manifest.json"
+-        return prepare_extract_job(tool, banks, manifest, search_root=bank_root, preferred_tokens=station_tokens)
++        return prepare_extract_job(tool, banks, manifest, search_root=bank_root, preferred_tokens=station_tokens, cpu_threads=self._fmod_cpu_threads())
+ 
+     def prepare_fmod_extract(self):
+         try:
+@@ -3603,7 +3607,7 @@
+ 
+         def job(report):
+             report(5, "[FMOD][EXTRACT] 正在准备外部工具目录。")
+-            res = prepare_extract_job(tool, banks, manifest, search_root=bank_root, preferred_tokens=station_tokens)
++            res = prepare_extract_job(tool, banks, manifest, search_root=bank_root, preferred_tokens=station_tokens, cpu_threads=self._fmod_cpu_threads())
+             if not res.ok:
+                 raise RuntimeError(res.message)
+             report(100, "Fmod Extract 准备完成。")
+@@ -3631,7 +3635,7 @@
+ 
+         def job(report):
+             report(5, "[FMOD][EXTRACT] 准备 bank 和 config.ini。")
+-            prep = prepare_extract_job(tool, banks, manifest, search_root=bank_root, preferred_tokens=station_tokens)
++            prep = prepare_extract_job(tool, banks, manifest, search_root=bank_root, preferred_tokens=station_tokens, cpu_threads=self._fmod_cpu_threads())
+             if not prep.ok:
+                 raise RuntimeError(prep.message)
+             report(55, prep.message)
+@@ -3660,7 +3664,7 @@
+         tool = self._current_fmod_tool_path()
+         wav_workspace = self._fmod_rebuild_workspace()
+         manifest = self._fmod_auto_dir() / "rebuild_manifest.json"
+-        return prepare_rebuild_job(tool, wav_workspace, manifest)
++        return prepare_rebuild_job(tool, wav_workspace, manifest, cpu_threads=self._fmod_cpu_threads())
+ 
+     def prepare_fmod_rebuild(self):
+         try:
+@@ -3673,7 +3677,7 @@
+ 
+         def job(report):
+             report(5, "[FMOD][REBUILD] 正在复制 fmod_ready_wav 到外部工具目录。")
+-            res = prepare_rebuild_job(tool, wav_workspace, manifest)
++            res = prepare_rebuild_job(tool, wav_workspace, manifest, cpu_threads=self._fmod_cpu_threads())
+             report(100, "Fmod Rebuild 准备完成。")
+             return res
+ 
+@@ -3697,7 +3701,7 @@
+ 
+         def job(report):
+             report(5, "[FMOD][REBUILD] 准备 wav 工作区和 config.ini。")
+-            prep = prepare_rebuild_job(tool, wav_workspace, manifest)
++            prep = prepare_rebuild_job(tool, wav_workspace, manifest, cpu_threads=self._fmod_cpu_threads())
+             report(55, prep.message)
+             res = launch_and_optionally_trigger(tool, "rebuild", auto_trigger=auto_click)
+             report(100, res.message)
+@@ -3882,7 +3886,7 @@
+                         profile_rows.append(summary_rows[-1].copy())
+                         continue
+                     manifest = station_dir / "extract_manifest.json"
+-                    prep = prepare_extract_job(tool, banks, manifest, search_root=bank_root, preferred_tokens=tokens)
++                    prep = prepare_extract_job(tool, banks, manifest, search_root=bank_root, preferred_tokens=tokens, cpu_threads=self._fmod_cpu_threads())
+                     if not prep.ok:
+                         summary_rows.append({
+                             "station": station_name, "status": "error", "xml_tracks": len(sample_rows),
+@@ -4140,7 +4144,7 @@
+             batch = banks[batch_idx * batch_size:(batch_idx + 1) * batch_size]
+             start_percent = 3 + int(55 * batch_idx / max(1, total_batches))
+             report(start_percent, f"[DEV][EXTRACT] 批次 {batch_idx + 1}/{total_batches}：Extract {len(batch)} 个 bank。")
+-            prep = prepare_extract_job(tool, batch, cache_root / f"extract_manifest_batch_{batch_idx + 1:04d}.json", clean_bank_dir=True, search_root=None, preferred_tokens=[])
++            prep = prepare_extract_job(tool, batch, cache_root / f"extract_manifest_batch_{batch_idx + 1:04d}.json", clean_bank_dir=True, search_root=None, preferred_tokens=[], cpu_threads=self._fmod_cpu_threads())
+             if not prep.ok:
+                 for b in batch:
+                     status_rows.append({"bank_name": b.name, "bank_path": str(b), "batch_id": batch_idx + 1, "status": "prepare_failed", "sound_count": 0, "extract_output_dir": "", "cache_used": 0, "error": prep.message})
+@@ -5275,7 +5279,7 @@
+             copy_banks_to_tool_bank_dir([game_by_name[bank_name]], layout, clean_bank_dir=True)
+             subset = self._subset_fmod_ready_workspace_for_bank(fmod_ready, bank_name, fmod_dir / f"rebuild_wav_{idx:02d}_{safe_stem(bank_name, 80)}")
+             rebuild_manifest = fmod_dir / f"{phase_label.lower()}_rebuild_{idx:02d}.json"
+-            prep_rebuild = prepare_rebuild_job(tool, subset, rebuild_manifest)
++            prep_rebuild = prepare_rebuild_job(tool, subset, rebuild_manifest, cpu_threads=self._fmod_cpu_threads())
+             if not prep_rebuild.layout:
+                 raise RuntimeError(f"Fmod Rebuild 工作目录准备失败：{bank_name}")
+             rebuild_res = launch_trigger_and_wait(
+@@ -5664,7 +5668,7 @@
+             fmod_dir = self._fmod_auto_dir()
+             report(3, "[MENU] 准备 Fmod Extract 工作目录。")
+             extract_manifest = fmod_dir / "main_menu_extract_manifest.json"
+-            prep_extract = prepare_extract_job(tool, [selected_bank], extract_manifest, search_root=selected_bank.parent)
++            prep_extract = prepare_extract_job(tool, [selected_bank], extract_manifest, search_root=selected_bank.parent, cpu_threads=self._fmod_cpu_threads())
+             if not prep_extract.layout or not prep_extract.ok:
+                 raise RuntimeError(prep_extract.message or "主菜单 Fmod Extract 工作目录准备失败。")
+             actual_bank_names = [Path(p).name for p in (prep_extract.output_files or [])]
+@@ -5802,7 +5806,7 @@
+ 
+             report(2, "[PACKAGE] 准备 Fmod Extract 工作目录。")
+             extract_manifest = fmod_dir / "package_extract_manifest.json"
+-            prep_extract = prepare_extract_job(tool, banks, extract_manifest, search_root=bank_root, preferred_tokens=station_tokens)
++            prep_extract = prepare_extract_job(tool, banks, extract_manifest, search_root=bank_root, preferred_tokens=station_tokens, cpu_threads=self._fmod_cpu_threads())
+             if not prep_extract.layout or not prep_extract.ok:
+                 raise RuntimeError(prep_extract.message or "Fmod Extract 工作目录准备失败。")
+             actual_bank_names = [Path(p).name for p in (prep_extract.output_files or [])]
+@@ -5928,7 +5932,7 @@
+ 
+             report(2, "[ONE-CLICK] 准备 Fmod Extract 工作目录。")
+             extract_manifest = fmod_dir / "one_click_extract_manifest.json"
+-            prep_extract = prepare_extract_job(tool, banks, extract_manifest, search_root=bank_root, preferred_tokens=station_tokens)
++            prep_extract = prepare_extract_job(tool, banks, extract_manifest, search_root=bank_root, preferred_tokens=station_tokens, cpu_threads=self._fmod_cpu_threads())
+             if not prep_extract.layout or not prep_extract.ok:
+                 raise RuntimeError(prep_extract.message or "Fmod Extract 工作目录准备失败。")
+             actual_bank_names = [Path(p).name for p in (prep_extract.output_files or [])]

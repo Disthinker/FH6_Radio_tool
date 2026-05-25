@@ -1,3 +1,11 @@
+# FH6 Radio Tool
+
+### v3.1.3 Developer matching performance hotfix
+
+- 优化开发者模式全 Bank Extract 之后的 XML → bank 匹配阶段。
+- 原流程会对每个 XML 曲目遍历所有 FMOD 记录并反复扫描大文本，3180 条曲目时会非常慢；新版改为一次性建立 token / 时长索引，再对每个曲目只检查小候选集。
+- 保留已有“删除旧记录重新测试 / 保留并继续 / 取消”提示。
+
 
 ## v3.0.27 正式版整理 / Release cleanup
 
@@ -255,4 +263,13 @@ Users do not need to choose the bank manually. After selecting the FH6 game root
 - Fixed PyInstaller BAT build failure where `build_pyinstaller\app.ico` was deleted by the clean step before PyInstaller copied it into the EXE.
 - The builder now regenerates the temporary icon after cleaning, and falls back to a no-custom-icon build if icon generation fails.
 - Use `build_pyinstaller_release.bat` from this package; do not reuse older v3.0.30/v3.0.36 build folders.
+
+### v3.0.40 UI polish
+
+- Fixes station selector slot-count labels to match the actually selectable/replaceable slot table.
+- Adds Chinese/English switching for the new developer-mode controls and hints.
+
+### v3.0.39 Developer Mode
+
+Step 3 now includes an Audio Research Developer Mode. It can extract all candidate FMOD bank files, generate an all-bank statistics CSV, and generate an XML-to-bank mapping CSV for researching DJ lines, stingers, sound effects, and station structure. The thread limit setting shows the local logical CPU count and a recommended safe maximum. Fmod Bank Tools GUI extraction remains serialized, while precheck/statistics work is bounded by the selected thread limit.
 

@@ -1,3 +1,32 @@
+## v3.1.3
+
+- Optimized developer-mode XML → bank matching after full-bank Extract.
+- Replaced the previous XML-target × FMOD-record full scan with indexed token and length-range matching.
+- Added a compact progress message for the new fast matching stage.
+- Existing all-bank Extract cache reuse / delete-and-retest prompt remains available.
+
+## v3.1.1
+
+- Release candidate for developer mode and main tool workflow.
+- Fixed Fmod Bank Tools CPU thread setting: the user-selected maximum thread count is now written into `config.ini` for Extract and Rebuild jobs instead of always falling back to 2.
+- The same thread limit is used by developer-mode precheck/statistics stages and by external Fmod Bank Tools encoding/rebuild stages, while Fmod GUI launches remain serial for stability.
+
+## v3.0.40
+
+- Fix station combo slot-count display so it uses the same visible/replaceable slot filtering as the actual slot table. This fixes cases such as a station label showing 29 slots while the table exposes only 27 replaceable rows.
+- Fix developer-mode UI localization. Developer-mode title, thread label, thread hint, buttons, and help text now switch between Chinese and English with the rest of the UI.
+- Refresh station combo labels when the UI language changes.
+
+
+## v3.0.39
+
+- Added an Audio Research Developer Mode.
+- Added one-click full-bank extraction/statistics workflow for `media/Audio/FMODBanks`.
+- Added `all_bank_extract_statistics.csv` for bank-level audio inventory and extract status.
+- Added `xml_to_bank_mapping.csv` for RadioInfo XML to candidate bank/audio mapping analysis.
+- Added developer CPU thread limit with local safe-thread recommendation.
+- Fmod Bank Tools GUI extraction is still serialized; CPU precheck/statistics/CSV generation are bounded by the selected max thread count.
+
 # FH6 Radio Tool v3.0.38 Fmod Automation Shortcut Hotfix
 
 This build fixes the issue where Fmod Bank Tools opened successfully but Extract/Rebuild was not automatically triggered.

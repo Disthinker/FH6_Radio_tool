@@ -256,12 +256,24 @@ def _qsettings_ini_path(path: Path) -> str:
     return Path(path).as_posix()
 
 
+def _clamp_cpu_threads(value: int | None) -> int:
+    try:
+        logical = max(1, int(os.cpu_count() or 1))
+    except Exception:
+        logical = 1
+    try:
+        requested = int(value if value is not None else logical)
+    except Exception:
+        requested = logical
+    return max(1, min(logical, requested))
+
+
 def write_config_ini(
     layout: FmodToolLayout,
     *,
     format_name: str = "vorbis",
     quality: int = 75,
-    cpu_threads: int = 2,
+    cpu_threads: int | None = None,
     default_settings: bool = True,
     encode_sync_point: bool = True,
     looping: bool = True,
@@ -279,7 +291,7 @@ def write_config_ini(
         "[Options]",
         f"Format={format_name}",
         f"Quality={int(quality)}",
-        f"CPUThreads={int(cpu_threads)}",
+        f"CPUThreads={_clamp_cpu_threads(cpu_threads)}",
         f"DefaultSettings={_bool_text(default_settings)}",
         f"EncodeSyncPoint={_bool_text(encode_sync_point)}",
         f"Looping={_bool_text(looping)}",
@@ -910,9 +922,10 @@ def prepare_extract_job(
     clean_bank_dir: bool = True,
     search_root: Path | None = None,
     preferred_tokens: Iterable[str] | None = None,
+    cpu_threads: int | None = None,
 ) -> FmodAutomationResult:
     layout = layout_from_exe(exe_path)
-    write_config_ini(layout)
+    write_config_ini(layout, cpu_threads=cpu_threads)
     # Clean previous outputs so one-click waiting cannot falsely succeed on stale files.
     _clean_directory(layout.wav_dir)
     _clean_directory(layout.fsb_dir)
@@ -1002,6 +1015,7 @@ def prepare_extract_job(
         "cu1_preflight_warnings": cu1_preflight_warnings,
         "bank_preflight": [bank_preflight_message(p) for p in requested],
         "preferred_station_tokens": [str(t) for t in (preferred_tokens or [])],
+        "cpu_threads": _clamp_cpu_threads(cpu_threads),
         "tool_root_dir": str(layout.root_dir),
         "launch_cwd": str(layout.root_dir),
         "config_path": str(layout.config_path),
@@ -1018,9 +1032,9 @@ def prepare_extract_job(
     return FmodAutomationResult(True, "extract_prepare", msg, layout, manifest, None, copied)
 
 
-def prepare_rebuild_job(exe_path: Path, wav_workspace: Path, manifest_path: Path, *, clean_wav_dir: bool = True) -> FmodAutomationResult:
+def prepare_rebuild_job(exe_path: Path, wav_workspace: Path, manifest_path: Path, *, clean_wav_dir: bool = True, cpu_threads: int | None = None) -> FmodAutomationResult:
     layout = layout_from_exe(exe_path)
-    write_config_ini(layout)
+    write_config_ini(layout, cpu_threads=cpu_threads)
     # Clean previous build output so deploy never uses stale .bank files.  Use
     # retry + verification because Windows may keep files locked when the user
     # left Fmod Bank Tools open from a previous run.
@@ -1036,6 +1050,7 @@ def prepare_rebuild_job(exe_path: Path, wav_workspace: Path, manifest_path: Path
         "wav_workspace": str(wav_workspace),
         "tool_wav_dir": str(wav_dir),
         "rebuild_dir_cleaned": True,
+        "cpu_threads": _clamp_cpu_threads(cpu_threads),
         "stale_build_files_blocked": [],
     })
     return FmodAutomationResult(True, "rebuild_prepare", f"已准备 Rebuild wav 工作区：{wav_dir}；旧 build 输出已清理。", layout, manifest, None, [wav_dir])

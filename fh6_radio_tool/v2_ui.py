@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import csv
 import json
+import os
 import shutil
 import sys
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from pathlib import Path
 
@@ -65,6 +67,44 @@ KNOWN_MULTI_TRACK_COMPLETE_STATIONS = {"Horizon Bass Arena"}
 # Users should only choose the replacement audio; the tool resolves this bank
 # automatically from the selected game root / FMODBanks tree.
 MAIN_MENU_PRESS_START_BANK = "GLB_RadioPressStart.assets.bank"
+COMPACT_PROGRESS_PREFIX = "__FH6_COMPACT_PROGRESS__|"
+
+
+def local_logical_cpu_count() -> int:
+    try:
+        return max(1, int(os.cpu_count() or 1))
+    except Exception:
+        return 1
+
+
+def recommended_safe_thread_count() -> int:
+    logical = local_logical_cpu_count()
+    if logical <= 2:
+        return 1
+    if logical <= 4:
+        return max(1, logical - 1)
+    return max(1, logical - 2)
+
+
+def dev_bank_role_from_key(bank_key: str) -> str:
+    key = (bank_key or "").lower()
+    if "_tracks_" in key and key.startswith("r"):
+        return "radio_tracks"
+    if key == "glb_radio_3d.assets" or key.startswith("glb_radio_3d"):
+        return "glb_radio_3d"
+    if key.startswith("glb_radiopressstart"):
+        return "press_start"
+    if key.startswith("glb_videoplayer"):
+        return "video_player"
+    if key.startswith("glb_snapshots"):
+        return "snapshot"
+    if "dj" in key or "stinger" in key or "jingle" in key:
+        return "dj_or_stinger_hint"
+    if "cutscene" in key or "cinematic" in key or "showcase" in key:
+        return "cinematic"
+    if "music" in key or "radio" in key:
+        return "music_hint"
+    return "other"
 
 # Temporary station-slot profile data derived from earlier diagnostics.
 # v3.0.17 changes the station model from "one station = one CU1 bank" to
@@ -355,6 +395,8 @@ class MainWindow(QMainWindow):
         self._task_bridge: MainThreadTaskBridge | None = None
         self._task_title = ""
         self._task_started_at = 0.0
+        self._compact_progress_lines: list[str] = []
+        self._last_compact_progress = ""
         self._heartbeat_timer = QTimer(self)
         self._heartbeat_timer.setInterval(1000)
         self._heartbeat_timer.timeout.connect(self._on_task_heartbeat)
@@ -474,6 +516,11 @@ class MainWindow(QMainWindow):
         self.log_box.setPlaceholderText("运行日志会显示在这里。")
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
+        self.compact_progress_label = QLabel("等待任务。")
+        self.compact_progress_label.setObjectName("CompactHint")
+        self.compact_progress_label.setWordWrap(True)
+        self.compact_progress_label.setMinimumHeight(36)
+        self.compact_progress_label.setMaximumHeight(60)
 
         central = QWidget()
         root_layout = QHBoxLayout(central)
@@ -536,6 +583,7 @@ class MainWindow(QMainWindow):
         self.log_box.setMinimumHeight(120)
         runtime_layout.addWidget(self.log_box, 1)
         runtime_layout.addWidget(self.progress)
+        runtime_layout.addWidget(self.compact_progress_label)
         self.log_panel.setMinimumWidth(310)
         log_layout.addWidget(self.guide_box)
         log_layout.addWidget(self.log_runtime_box, 1)
@@ -671,6 +719,131 @@ class MainWindow(QMainWindow):
     def toggle_setup_panel(self) -> None:
         self.path_box.setVisible(not self.path_box.isVisible())
         self.update_setup_toggle_text()
+
+    def dev_thread_hint_text(self) -> str:
+        logical = local_logical_cpu_count()
+        safe = recommended_safe_thread_count()
+        current = self._dev_max_threads() if hasattr(self, "dev_thread_spin") else safe
+        if self.ui_lang() == "en":
+            return f"Local logical threads: {logical}; recommended safe limit: {safe}; developer tasks and Fmod Bank Tools CPUThreads will use at most: {current}. Fmod GUI launches are kept serial to avoid opening multiple Bank Tools instances."
+        return f"本机逻辑线程: {logical}；建议安全上限: {safe}；当前开发任务和 Fmod Bank Tools CPUThreads 最多使用: {current}。Fmod GUI 启动会自动串行，避免同时打开多个 Bank Tools。"
+
+    def _dev_max_threads(self) -> int:
+        try:
+            value = int(self.dev_thread_spin.value())
+        except Exception:
+            value = int(self.store.get_setting("dev_max_threads", recommended_safe_thread_count()) or recommended_safe_thread_count())
+        return max(1, min(local_logical_cpu_count(), value))
+
+    def _fmod_cpu_threads(self) -> int:
+        """Thread limit used for external Fmod Bank Tools config.ini."""
+        return self._dev_max_threads()
+
+    def on_dev_thread_count_changed(self, value: int) -> None:
+        value = max(1, min(local_logical_cpu_count(), int(value)))
+        self.store.set_setting("dev_max_threads", value)
+        safe = recommended_safe_thread_count()
+        if hasattr(self, "dev_thread_hint"):
+            self.dev_thread_hint.setText(self.dev_thread_hint_text())
+        if value > safe:
+            self.log(self.log_text(
+                f"[DEV][THREAD][WARN] 当前设置 {value} 高于建议安全上限 {safe}。长时间全 bank 扫描可能影响系统响应。",
+                f"[DEV][THREAD][WARN] Current setting {value} is above the recommended safe limit {safe}. A long full-bank scan may affect system responsiveness.",
+            ))
+
+    def _dev_radioinfo_xml_candidates(self) -> list[Path]:
+        candidates: list[Path] = []
+        for p in self.xml_candidates or []:
+            try:
+                pp = Path(p)
+                if pp.exists():
+                    candidates.append(pp)
+            except Exception:
+                pass
+        if self.current_xml and Path(self.current_xml).exists():
+            candidates.append(Path(self.current_xml))
+        game_root_text = self.game_root_edit.text().strip() if hasattr(self, "game_root_edit") else ""
+        if game_root_text:
+            root = Path(game_root_text)
+            search_roots = [root / "media" / "Audio", root]
+            for base in search_roots:
+                if not base.exists():
+                    continue
+                try:
+                    for p in base.rglob("RadioInfo*.xml"):
+                        candidates.append(p)
+                except Exception:
+                    pass
+        # Keep deterministic order and de-duplicate by resolved path when possible.
+        out: list[Path] = []
+        seen: set[str] = set()
+        for p in candidates:
+            try:
+                key = str(p.resolve()).lower()
+            except Exception:
+                key = str(p).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(p)
+        return sorted(out, key=lambda x: x.as_posix().lower())
+
+    def _dev_filter_extractable_banks(self, banks: list[Path], report, label: str) -> tuple[list[Path], list[dict[str, object]]]:
+        banks = [Path(b) for b in banks]
+        max_workers = self._dev_max_threads()
+        report(4, COMPACT_PROGRESS_PREFIX + self.ui_text(
+            f"预检查 bank：0/{len(banks)}，最大线程 {max_workers}。",
+            f"Prechecking banks: 0/{len(banks)}, max threads {max_workers}.",
+        ))
+        rows: list[dict[str, object]] = []
+        extractable: list[Path] = []
+        if not banks:
+            return extractable, rows
+        def check_one(bank: Path) -> dict[str, object]:
+            has_fsb = False
+            error = ""
+            try:
+                has_fsb = bool(bank_contains_fsb_audio(bank))
+            except Exception as exc:
+                error = str(exc)
+            try:
+                st = bank.stat()
+                size = int(st.st_size)
+            except Exception:
+                size = -1
+            return {
+                "bank_name": bank.name,
+                "bank_path": str(bank),
+                "bank_key": bank.stem.lower(),
+                "size_bytes": size,
+                "size_mb": f"{(size / 1024 / 1024):.3f}" if size >= 0 else "",
+                "precheck_has_fsb": 1 if has_fsb else 0,
+                "precheck_error": error,
+            }
+        done_count = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            future_map = {ex.submit(check_one, b): b for b in banks}
+            for fut in as_completed(future_map):
+                bank = future_map[fut]
+                try:
+                    row = fut.result()
+                except Exception as exc:
+                    row = {"bank_name": bank.name, "bank_path": str(bank), "bank_key": bank.stem.lower(), "size_bytes": -1, "size_mb": "", "precheck_has_fsb": 0, "precheck_error": str(exc)}
+                rows.append(row)
+                if int(row.get("precheck_has_fsb") or 0):
+                    extractable.append(bank)
+                done_count += 1
+                if done_count == 1 or done_count % 50 == 0 or done_count == len(banks):
+                    report(4 + int(7 * done_count / max(1, len(banks))), COMPACT_PROGRESS_PREFIX + self.ui_text(
+                        f"预检查 bank：{done_count}/{len(banks)}，可提取 {len(extractable)}。",
+                        f"Prechecking banks: {done_count}/{len(banks)}, extractable {len(extractable)}.",
+                    ))
+        extractable.sort(key=lambda p: p.as_posix().lower())
+        rows.sort(key=lambda r: str(r.get("bank_path", "")).lower())
+        return extractable, rows
+
+    def dev_extract_all_banks_and_generate_tables(self):
+        self.dev_search_unmatched_soundnames()
 
     def _auto_hide_setup_if_ready(self) -> None:
         ready = bool(self.game_root_edit.text().strip() and self.music_dir_edit.text().strip() and self.xml_edit.text().strip())
@@ -1107,6 +1280,46 @@ class MainWindow(QMainWindow):
         menu_grid.addLayout(menu_action_row, 3, 0, 1, 4)
         outer.addWidget(self.main_menu_music_box)
 
+        self.dev_mode_box = QGroupBox("开发者模式 / Audio research developer mode")
+        dev_grid = QGridLayout(self.dev_mode_box)
+        dev_grid.setContentsMargins(12, 10, 12, 10)
+        dev_grid.setHorizontalSpacing(8)
+        dev_grid.setVerticalSpacing(8)
+        dev_grid.setColumnStretch(1, 1)
+
+        self.lbl_dev_threads = QLabel("最大 CPU 线程")
+        self.dev_thread_spin = QSpinBox()
+        self.dev_thread_spin.setRange(1, local_logical_cpu_count())
+        saved_threads = self.store.get_setting("dev_max_threads", recommended_safe_thread_count())
+        try:
+            saved_threads_i = int(saved_threads)
+        except Exception:
+            saved_threads_i = recommended_safe_thread_count()
+        self.dev_thread_spin.setValue(max(1, min(local_logical_cpu_count(), saved_threads_i)))
+        self.dev_thread_spin.setMaximumWidth(100)
+        self.dev_thread_spin.valueChanged.connect(self.on_dev_thread_count_changed)
+        self.dev_thread_hint = QLabel(self.dev_thread_hint_text())
+        self.dev_thread_hint.setObjectName("CompactHint")
+        self.dev_thread_hint.setWordWrap(True)
+
+        self.btn_dev_full_audio_scan = QPushButton("一键 Extract 全部 Bank 并生成统计/映射表")
+        self.btn_dev_full_audio_scan.setMinimumWidth(290)
+        self.btn_dev_full_audio_scan.clicked.connect(self.dev_extract_all_banks_and_generate_tables)
+        self.btn_dev_menu_scan = QPushButton("扫描主菜单/前端音乐 Bank")
+        self.btn_dev_menu_scan.setMinimumWidth(220)
+        self.btn_dev_menu_scan.clicked.connect(self.dev_scan_menu_music_banks)
+        self.dev_mode_hint = QLabel("用于研究 DJ、stinger、音效和 XML→bank 关系。该模式只 Extract/统计，不写 XML、不 Rebuild、不覆盖游戏文件。Fmod Bank Tools Extract 仍会串行执行；预检查、统计和 CSV 生成会在不超过上方设置的线程数内自动分配。")
+        self.dev_mode_hint.setObjectName("CompactHint")
+        self.dev_mode_hint.setWordWrap(True)
+
+        dev_grid.addWidget(self.lbl_dev_threads, 0, 0)
+        dev_grid.addWidget(self.dev_thread_spin, 0, 1)
+        dev_grid.addWidget(self.dev_thread_hint, 0, 2, 1, 2)
+        dev_grid.addWidget(self.btn_dev_full_audio_scan, 1, 0, 1, 2)
+        dev_grid.addWidget(self.btn_dev_menu_scan, 1, 2, 1, 2)
+        dev_grid.addWidget(self.dev_mode_hint, 2, 0, 1, 4)
+        outer.addWidget(self.dev_mode_box)
+
         self.final_hint = QLabel("推荐：选择游戏目录和音乐目录 → 勾选槽位和音乐 → 应用选择替换 → 设置 Marker → 生成 Mod 包或一键替换。主菜单音乐可在上方单独替换，只需选择新音乐文件。")
         self.final_hint.setObjectName("CompactHint")
         self.final_hint.setWordWrap(True)
@@ -1176,6 +1389,7 @@ class MainWindow(QMainWindow):
             'lbl_preview_scene': ("Scene preview", "场景试听"),
             'lbl_marker_target': ("Target Marker", "目标 Marker"),
             'log_title_label': ("Log", "日志 / Log"),
+            'lbl_dev_threads': ("Max CPU threads", "最大 CPU 线程"),
         }
         for attr, (en_text, zh_text) in pairs.items():
             obj = getattr(self, attr, None)
@@ -1216,6 +1430,8 @@ class MainWindow(QMainWindow):
             'btn_apply_safe_markers_all': ("No Loop / Safe to All", "全部无循环"),
             'btn_import_markers': ("Import markers", "导入 Marker"),
             'btn_export_marker_template': ("Export template", "导出模板"),
+            'btn_dev_full_audio_scan': ("Extract all banks and generate statistics/mapping tables", "一键 Extract 全部 Bank 并生成统计/映射表"),
+            'btn_dev_menu_scan': ("Scan main-menu/frontend music banks", "扫描主菜单/前端音乐 Bank"),
         }
         for attr, (en_text, zh_text) in buttons.items():
             obj = getattr(self, attr, None)
@@ -1235,6 +1451,19 @@ class MainWindow(QMainWindow):
                 if en else
                 "推荐：选择游戏目录和音乐目录 → 勾选槽位和音乐 → 应用选择替换 → 设置 Marker → 生成 Mod 包或一键替换。主菜单音乐可在上方单独替换，只需选择新音乐文件。"
             )
+        if hasattr(self, 'dev_mode_box'):
+            self.dev_mode_box.setTitle("Developer mode / Audio research" if en else "开发者模式 / Audio research developer mode")
+        if hasattr(self, 'compact_progress_label') and not getattr(self, '_busy', False) and not getattr(self, '_compact_progress_lines', []):
+            self.compact_progress_label.setText("Idle." if en else "等待任务。")
+        if hasattr(self, 'dev_thread_hint'):
+            self.dev_thread_hint.setText(self.dev_thread_hint_text())
+        if hasattr(self, 'dev_mode_hint'):
+            self.dev_mode_hint.setText(
+                "For researching DJ, stinger, SFX, and XML→bank relationships. This mode only extracts and generates statistics; it does not write XML, rebuild banks, or overwrite game files. If previous scan data is found, the tool will ask whether to delete it and retest or reuse the existing cache. Fmod Bank Tools Extract is kept serial; precheck/statistics/CSV stages are automatically scheduled within the CPU thread limit above."
+                if en else
+                "用于研究 DJ、stinger、音效和 XML→bank 关系。该模式只 Extract/统计，不写 XML、不 Rebuild、不覆盖游戏文件。如果发现已有扫描记录，工具会询问是否删除旧记录并重新测试，或复用已有缓存。Fmod Bank Tools Extract 仍会串行执行；预检查、统计和 CSV 生成会在不超过上方设置的线程数内自动分配。"
+            )
+        self._refresh_station_combo_labels()
         if hasattr(self, 'main_menu_mode_combo'):
             current = self.main_menu_mode_combo.currentData()
             self.main_menu_mode_combo.blockSignals(True)
@@ -1488,6 +1717,57 @@ class MainWindow(QMainWindow):
         )
         return answer == QMessageBox.Yes
 
+    def _non_empty_paths(self, paths: list[Path]) -> list[Path]:
+        out: list[Path] = []
+        for p in paths:
+            try:
+                if p.is_dir():
+                    if any(p.iterdir()):
+                        out.append(p)
+                elif p.exists():
+                    out.append(p)
+            except Exception:
+                if p.exists():
+                    out.append(p)
+        return out
+
+    def _dev_full_scan_record_paths(self) -> list[Path]:
+        work = project_work_dir()
+        return [
+            work / "dev_all_station_bank_sound_scan",
+            work / "dev_fmod_extract_cache" / safe_stem("all_extractable_banks_v3_batched", 80),
+        ]
+
+    def ask_dev_existing_scan_action(self, paths: list[Path]) -> str:
+        """Return delete/reuse/cancel for existing developer scan data."""
+        shown = "\n".join(f"- {p}" for p in paths[:6])
+        if len(paths) > 6:
+            shown += f"\n- ... +{len(paths) - 6} more"
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle(self.ui_text("发现已有开发者扫描记录", "Existing developer scan data found"))
+        box.setText(self.ui_text(
+            "检测到之前的开发者 Extract/统计记录。\n\n"
+            f"{shown}\n\n"
+            "选择“删除并重新测试”会清空旧缓存并重新 Extract 全部 bank；\n"
+            "选择“保留并继续”会尽量复用已有 Extract 缓存，只重新生成统计/映射表。",
+            "Previous developer Extract/statistics data was found.\n\n"
+            f"{shown}\n\n"
+            "Choose 'Delete and retest' to clear the old cache and Extract all banks again;\n"
+            "choose 'Keep and continue' to reuse the existing Extract cache when possible and regenerate the reports.",
+        ))
+        delete_btn = box.addButton(self.ui_text("删除并重新测试", "Delete and retest"), QMessageBox.YesRole)
+        reuse_btn = box.addButton(self.ui_text("保留并继续", "Keep and continue"), QMessageBox.NoRole)
+        cancel_btn = box.addButton(self.ui_text("取消", "Cancel"), QMessageBox.RejectRole)
+        box.setDefaultButton(reuse_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == delete_btn:
+            return "delete"
+        if clicked == reuse_btn:
+            return "reuse"
+        return "cancel"
+
     def confirm_box(self, title_zh: str, message_zh: str, title_en: str | None = None, message_en: str | None = None) -> bool:
         """Compatibility wrapper for confirmation dialogs used by developer tools."""
         return self.question_box(title_zh, message_zh, title_en, message_en)
@@ -1553,17 +1833,40 @@ class MainWindow(QMainWindow):
             return
         elapsed = int(max(0, time.monotonic() - self._task_started_at))
         title = self._task_title or self.ui_text("任务", "Task")
-        self.statusBar().showMessage(
-            self.ui_text(
-                f"{title} 正在运行... {elapsed}s。界面仍可响应；Extract/Rebuild 运行时请不要关闭 Fmod Bank Tools。",
-                f"{title} running... {elapsed}s. UI is responsive; do not close Fmod Bank Tools while Extract/Rebuild is running.",
-            )
+        status = self.ui_text(
+            f"{title} 正在运行... {elapsed}s。界面仍可响应；Extract/Rebuild 运行时请不要关闭 Fmod Bank Tools。",
+            f"{title} running... {elapsed}s. UI is responsive; do not close Fmod Bank Tools while Extract/Rebuild is running.",
         )
+        self.statusBar().showMessage(status)
+        if hasattr(self, "compact_progress_label") and self._last_compact_progress:
+            elapsed_line = self.ui_text(f"已运行 {elapsed}s。", f"Elapsed: {elapsed}s.")
+            lines = list(self._compact_progress_lines[-2:])
+            if not lines or lines[-1] != elapsed_line:
+                self.compact_progress_label.setText("\n".join((lines + [elapsed_line])[-3:]))
         self.progress.repaint()
 
     def txt_path(self, edit: QLineEdit) -> Path | None:
         text = edit.text().strip().strip('"')
         return Path(text) if text else None
+
+    def _compact_progress_text(self, value: int, message: str) -> str:
+        msg = str(message or "").strip()
+        if msg.startswith(COMPACT_PROGRESS_PREFIX):
+            msg = msg[len(COMPACT_PROGRESS_PREFIX):].strip()
+        pct = max(0, min(100, int(value)))
+        return f"[{pct:3d}%] {msg}" if msg else f"[{pct:3d}%]"
+
+    def _set_compact_progress(self, value: int, message: str) -> None:
+        if not hasattr(self, "compact_progress_label"):
+            return
+        line = self._compact_progress_text(value, message)
+        if not line.strip():
+            return
+        if not self._compact_progress_lines or self._compact_progress_lines[-1] != line:
+            self._compact_progress_lines.append(line)
+            self._compact_progress_lines = self._compact_progress_lines[-3:]
+        self._last_compact_progress = line
+        self.compact_progress_label.setText("\n".join(self._compact_progress_lines[-3:]))
 
     def log(self, text: str) -> None:
         self.log_box.appendPlainText(self.log_text(str(text)))
@@ -1572,7 +1875,11 @@ class MainWindow(QMainWindow):
         self.progress.setRange(0, 100)
         self.progress.setValue(max(0, min(100, int(value))))
         if message:
-            self.log(message)
+            progress_only = str(message).startswith(COMPACT_PROGRESS_PREFIX)
+            clean_message = str(message)[len(COMPACT_PROGRESS_PREFIX):] if progress_only else str(message)
+            self._set_compact_progress(value, clean_message)
+            if not progress_only:
+                self.log(clean_message)
 
     def run_background_task(self, title: str, job, on_success=None, *, estimated: str = "") -> None:
         """Run a long operation in a QThread while all UI work stays on GUI thread."""
@@ -1591,6 +1898,10 @@ class MainWindow(QMainWindow):
         # draggable.
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
+        self._compact_progress_lines = []
+        self._last_compact_progress = ""
+        if hasattr(self, "compact_progress_label"):
+            self.compact_progress_label.setText(self.ui_text("正在启动任务...", "Starting task..."))
         self.progress.setFormat(f"{title} - %p%")
         self._heartbeat_timer.start()
         self.statusBar().showMessage(self.ui_text(f"{title} 正在运行... 你可以移动窗口并查看进度。", f"{title} running... You can move the window and read progress below."))
@@ -1619,6 +1930,11 @@ class MainWindow(QMainWindow):
             if ok:
                 self.progress.setRange(0, 100)
                 self.progress.setValue(100)
+                if hasattr(self, "compact_progress_label"):
+                    self.compact_progress_label.setText(self.ui_text("任务完成。", "Task finished."))
+            else:
+                if hasattr(self, "compact_progress_label"):
+                    self.compact_progress_label.setText(self.ui_text("任务失败，请查看日志。", "Task failed. See the log."))
 
         def handle_success(result):
             finish_ui(True)
@@ -1851,8 +2167,12 @@ class MainWindow(QMainWindow):
         self.run_background_task("扫描游戏根目录", job, done, estimated="小型目录数秒；完整游戏目录通常 10–60 秒。")
 
     def load_xml(self, xml_path: Path, quiet: bool = False):
+        old_xml = self.current_xml
         try:
             tree = parse_xml(xml_path)
+            # Set current_xml before populating the station combo so duplicate/alias
+            # filtering used by _station_combo_label sees the same XML as reload_slots.
+            self.current_xml = Path(xml_path)
             self.station_infos = list_station_infos(tree)
             self.station_combo.blockSignals(True)
             self.station_combo.clear()
@@ -1861,12 +2181,12 @@ class MainWindow(QMainWindow):
             self.station_combo.blockSignals(False)
             self._refresh_station_combo_width()
             QTimer.singleShot(0, self._refresh_station_combo_width)
-            self.current_xml = Path(xml_path)
             self.store.set_setting("xml_path", str(xml_path))
             if not quiet:
                 self.log(f"[OK] XML 已加载: {xml_path}")
             self.reload_slots()
         except Exception as exc:
+            self.current_xml = old_xml
             if quiet:
                 self.log(f"[WARN] 上次 XML 无法加载: {exc}")
             else:
@@ -2041,6 +2361,23 @@ class MainWindow(QMainWindow):
             return True
         profile = self._station_slot_profile(self.current_station_name(), self.slot_table.rowCount())
         return self._is_slot_replaceable(slot, profile)
+
+    def _refresh_station_combo_labels(self) -> None:
+        if not hasattr(self, "station_combo"):
+            return
+        if not getattr(self, "station_infos", None):
+            return
+        current = self.station_combo.currentData()
+        self.station_combo.blockSignals(True)
+        self.station_combo.clear()
+        for st in self.station_infos:
+            self.station_combo.addItem(self._station_combo_label(st), st.name)
+        if current is not None:
+            idx = self.station_combo.findData(current)
+            if idx >= 0:
+                self.station_combo.setCurrentIndex(idx)
+        self.station_combo.blockSignals(False)
+        self._refresh_station_combo_width()
 
     def _station_combo_label(self, station_info) -> str:
         profile = self._station_slot_profile(getattr(station_info, "name", ""), int(getattr(station_info, "track_slot_count", 0) or 0))
@@ -3359,7 +3696,7 @@ class MainWindow(QMainWindow):
         banks = self._selected_bank_paths_for_current_station()
         station_tokens = self._station_bank_tokens()
         manifest = self._fmod_auto_dir() / "extract_manifest.json"
-        return prepare_extract_job(tool, banks, manifest, search_root=bank_root, preferred_tokens=station_tokens)
+        return prepare_extract_job(tool, banks, manifest, search_root=bank_root, preferred_tokens=station_tokens, cpu_threads=self._fmod_cpu_threads())
 
     def prepare_fmod_extract(self):
         try:
@@ -3374,7 +3711,7 @@ class MainWindow(QMainWindow):
 
         def job(report):
             report(5, "[FMOD][EXTRACT] 正在准备外部工具目录。")
-            res = prepare_extract_job(tool, banks, manifest, search_root=bank_root, preferred_tokens=station_tokens)
+            res = prepare_extract_job(tool, banks, manifest, search_root=bank_root, preferred_tokens=station_tokens, cpu_threads=self._fmod_cpu_threads())
             if not res.ok:
                 raise RuntimeError(res.message)
             report(100, "Fmod Extract 准备完成。")
@@ -3402,7 +3739,7 @@ class MainWindow(QMainWindow):
 
         def job(report):
             report(5, "[FMOD][EXTRACT] 准备 bank 和 config.ini。")
-            prep = prepare_extract_job(tool, banks, manifest, search_root=bank_root, preferred_tokens=station_tokens)
+            prep = prepare_extract_job(tool, banks, manifest, search_root=bank_root, preferred_tokens=station_tokens, cpu_threads=self._fmod_cpu_threads())
             if not prep.ok:
                 raise RuntimeError(prep.message)
             report(55, prep.message)
@@ -3431,7 +3768,7 @@ class MainWindow(QMainWindow):
         tool = self._current_fmod_tool_path()
         wav_workspace = self._fmod_rebuild_workspace()
         manifest = self._fmod_auto_dir() / "rebuild_manifest.json"
-        return prepare_rebuild_job(tool, wav_workspace, manifest)
+        return prepare_rebuild_job(tool, wav_workspace, manifest, cpu_threads=self._fmod_cpu_threads())
 
     def prepare_fmod_rebuild(self):
         try:
@@ -3444,7 +3781,7 @@ class MainWindow(QMainWindow):
 
         def job(report):
             report(5, "[FMOD][REBUILD] 正在复制 fmod_ready_wav 到外部工具目录。")
-            res = prepare_rebuild_job(tool, wav_workspace, manifest)
+            res = prepare_rebuild_job(tool, wav_workspace, manifest, cpu_threads=self._fmod_cpu_threads())
             report(100, "Fmod Rebuild 准备完成。")
             return res
 
@@ -3468,7 +3805,7 @@ class MainWindow(QMainWindow):
 
         def job(report):
             report(5, "[FMOD][REBUILD] 准备 wav 工作区和 config.ini。")
-            prep = prepare_rebuild_job(tool, wav_workspace, manifest)
+            prep = prepare_rebuild_job(tool, wav_workspace, manifest, cpu_threads=self._fmod_cpu_threads())
             report(55, prep.message)
             res = launch_and_optionally_trigger(tool, "rebuild", auto_trigger=auto_click)
             report(100, res.message)
@@ -3653,7 +3990,7 @@ class MainWindow(QMainWindow):
                         profile_rows.append(summary_rows[-1].copy())
                         continue
                     manifest = station_dir / "extract_manifest.json"
-                    prep = prepare_extract_job(tool, banks, manifest, search_root=bank_root, preferred_tokens=tokens)
+                    prep = prepare_extract_job(tool, banks, manifest, search_root=bank_root, preferred_tokens=tokens, cpu_threads=self._fmod_cpu_threads())
                     if not prep.ok:
                         summary_rows.append({
                             "station": station_name, "status": "error", "xml_tracks": len(sample_rows),
@@ -3903,20 +4240,30 @@ class MainWindow(QMainWindow):
                 elif item.is_file():
                     shutil.copy2(item, dst)
 
-        report(3, f"[DEV][EXTRACT] 准备分批 Extract {len(banks)} 个 bank：{label}；每批 {batch_size} 个，已完成批次会写入缓存。")
+        report(3, COMPACT_PROGRESS_PREFIX + self.ui_text(
+            f"准备 Extract：{len(banks)} 个 bank，每批 {batch_size} 个。",
+            f"Preparing Extract: {len(banks)} banks, {batch_size} per batch.",
+        ))
         status_rows: list[dict[str, object]] = []
         total_batches = (len(banks) + batch_size - 1) // batch_size
         layout_for_status = layout_from_exe(tool)
         for batch_idx in range(total_batches):
             batch = banks[batch_idx * batch_size:(batch_idx + 1) * batch_size]
             start_percent = 3 + int(55 * batch_idx / max(1, total_batches))
-            report(start_percent, f"[DEV][EXTRACT] 批次 {batch_idx + 1}/{total_batches}：Extract {len(batch)} 个 bank。")
-            prep = prepare_extract_job(tool, batch, cache_root / f"extract_manifest_batch_{batch_idx + 1:04d}.json", clean_bank_dir=True, search_root=None, preferred_tokens=[])
+            report(start_percent, COMPACT_PROGRESS_PREFIX + self.ui_text(
+                f"Extract 批次 {batch_idx + 1}/{total_batches}：{len(batch)} 个 bank，请不要关闭 Fmod Bank Tools。",
+                f"Extract batch {batch_idx + 1}/{total_batches}: {len(batch)} banks. Do not close Fmod Bank Tools.",
+            ))
+            prep = prepare_extract_job(tool, batch, cache_root / f"extract_manifest_batch_{batch_idx + 1:04d}.json", clean_bank_dir=True, search_root=None, preferred_tokens=[], cpu_threads=self._fmod_cpu_threads())
             if not prep.ok:
                 for b in batch:
                     status_rows.append({"bank_name": b.name, "bank_path": str(b), "batch_id": batch_idx + 1, "status": "prepare_failed", "sound_count": 0, "extract_output_dir": "", "cache_used": 0, "error": prep.message})
                 continue
             res = launch_trigger_and_wait(tool, "extract", auto_trigger=self._fmod_auto_click_enabled(), timeout_sec=2400)
+            report(min(95, start_percent + 2), COMPACT_PROGRESS_PREFIX + self.ui_text(
+                f"Extract 批次 {batch_idx + 1}/{total_batches} 已结束，正在扫描输出文件。",
+                f"Extract batch {batch_idx + 1}/{total_batches} finished; scanning output files.",
+            ))
             batch_out = cache_root / f"batch_{batch_idx + 1:04d}_wav"
             if batch_out.exists():
                 shutil.rmtree(batch_out, ignore_errors=True)
@@ -3933,6 +4280,10 @@ class MainWindow(QMainWindow):
             for rec in batch_records:
                 key = self._dev_record_bank_key(rec)
                 key_sound_count[key] = key_sound_count.get(key, 0) + 1
+            report(min(97, start_percent + 3), COMPACT_PROGRESS_PREFIX + self.ui_text(
+                f"正在记录批次 {batch_idx + 1}/{total_batches} 的 Extract 状态。",
+                f"Writing Extract status for batch {batch_idx + 1}/{total_batches}.",
+            ))
             for b in batch:
                 key = bank_key_from_path(b)
                 sound_count = key_sound_count.get(key, 0)
@@ -3947,12 +4298,20 @@ class MainWindow(QMainWindow):
                     err = res.message
                 status_rows.append({"bank_name": b.name, "bank_path": str(b), "batch_id": batch_idx + 1, "status": st, "sound_count": sound_count, "extract_output_dir": str(batch_out), "cache_used": 0, "error": err})
 
+        report(88, COMPACT_PROGRESS_PREFIX + self.ui_text(
+            "所有 Extract 批次完成，正在写入状态表。",
+            "All Extract batches completed; writing status table.",
+        ))
         with status_path.open("w", encoding="utf-8-sig", newline="") as f:
             fields = ["bank_name", "bank_path", "batch_id", "status", "sound_count", "extract_output_dir", "cache_used", "error"]
             writer = csv.DictWriter(f, fieldnames=fields)
             writer.writeheader()
             writer.writerows(status_rows)
 
+        report(90, COMPACT_PROGRESS_PREFIX + self.ui_text(
+            "正在解析合并后的 wav/txt 输出。",
+            "Parsing merged wav/txt output.",
+        ))
         records = parse_extract_template(extract_dir)
         unique_keys = {self._dev_record_bank_key(r) for r in records}
         manifest_path.write_text(json.dumps(expected_manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -3993,36 +4352,70 @@ class MainWindow(QMainWindow):
         if not self.confirm_box("确认全电台音频扫描", msg, "Confirm all-station audio scan", msg_en):
             return
 
+        existing_records = self._non_empty_paths(self._dev_full_scan_record_paths())
+        existing_action = "none"
+        if existing_records:
+            existing_action = self.ask_dev_existing_scan_action(existing_records)
+            if existing_action == "cancel":
+                return
+
         def job(report):
             out_root = project_work_dir() / "dev_all_station_bank_sound_scan"
+            cache_root_to_reset = project_work_dir() / "dev_fmod_extract_cache" / safe_stem("all_extractable_banks_v3_batched", 80)
+            if existing_action == "delete":
+                report(1, COMPACT_PROGRESS_PREFIX + self.ui_text(
+                    "正在删除旧开发者扫描记录并准备重新 Extract。",
+                    "Deleting old developer scan data and preparing a fresh Extract.",
+                ))
+                if cache_root_to_reset.exists():
+                    shutil.rmtree(cache_root_to_reset, ignore_errors=True)
+            elif existing_action == "reuse":
+                report(1, COMPACT_PROGRESS_PREFIX + self.ui_text(
+                    "保留已有开发者缓存；如果匹配当前 bank，将复用并重新生成表格。",
+                    "Keeping existing developer cache; matching bank cache will be reused while reports are regenerated.",
+                ))
             if out_root.exists():
                 shutil.rmtree(out_root, ignore_errors=True)
             out_root.mkdir(parents=True, exist_ok=True)
 
-            tree = parse_xml(Path(self.current_xml))
-            stations = list_station_infos(tree)
+            report(1, COMPACT_PROGRESS_PREFIX + self.ui_text(
+                "正在收集 XML 和 bank 文件。",
+                "Collecting XML and bank files.",
+            ))
+            xml_paths = self._dev_radioinfo_xml_candidates()
+            if not xml_paths and self.current_xml:
+                xml_paths = [Path(self.current_xml)]
+            stations_by_xml: dict[str, list[object]] = {}
             target_rows: list[dict[str, object]] = []
-            for st in stations:
-                station_name = str(st.name)
-                for row in station_sample_rows(Path(self.current_xml), station_name):
-                    target_rows.append({
-                        "station": station_name,
-                        "slot_index": int(row.get("slot_index", -1)),
-                        "sound_name": str(row.get("sound_name", "")),
-                        "display_name": str(row.get("original_display_name", "")),
-                        "artist": str(row.get("original_artist", "")),
-                        "sample_length": int(row.get("sample_length") or 0),
-                        "sample_rate": int(row.get("sample_rate") or 0),
-                    })
+            for xml_path in xml_paths:
+                try:
+                    tree = parse_xml(Path(xml_path))
+                    stations = list_station_infos(tree)
+                    stations_by_xml[str(xml_path)] = stations
+                except Exception as exc:
+                    report(5, f"[DEV][XML][WARN] 跳过无法解析的 XML: {xml_path} ({exc})")
+                    continue
+                for st in stations:
+                    station_name = str(st.name)
+                    for row in station_sample_rows(Path(xml_path), station_name):
+                        target_rows.append({
+                            "xml_file": Path(xml_path).name,
+                            "xml_path": str(xml_path),
+                            "station": station_name,
+                            "slot_index": int(row.get("slot_index", -1)),
+                            "sound_name": str(row.get("sound_name", "")),
+                            "display_name": str(row.get("original_display_name", "")),
+                            "artist": str(row.get("original_artist", "")),
+                            "sample_length": int(row.get("sample_length") or 0),
+                            "sample_rate": int(row.get("sample_rate") or 0),
+                        })
 
             try:
                 all_banks = sorted(Path(bank_root).rglob("*.bank"), key=lambda p: p.as_posix().lower())
             except Exception:
                 all_banks = []
-            candidate_banks = [
-                p for p in all_banks
-                if ("strings" not in p.name.lower() and "master" not in p.name.lower() and bank_contains_fsb_audio(p))
-            ]
+            precheck_pool = [p for p in all_banks if ("strings" not in p.name.lower() and "master" not in p.name.lower())]
+            candidate_banks, bank_precheck_rows = self._dev_filter_extractable_banks(precheck_pool, report, "all bank developer scan")
 
             rows_out: list[dict[str, object]] = []
             station_summary: dict[str, dict[str, object]] = {}
@@ -4049,13 +4442,16 @@ class MainWindow(QMainWindow):
             text_blob_by_key: dict[str, str] = {}
             if not ok or extract_dir is None:
                 rows_out.append({
-                    "station": "", "target_slot": "", "target_sound_name": "", "target_display_name": "",
+                    "xml_file": "", "station": "", "target_slot": "", "target_sound_name": "", "target_display_name": "",
                     "candidate_rank": "", "candidate_bank": "", "candidate_sound_file": "", "candidate_frames": "",
                     "candidate_samplerate": "", "candidate_duration_sec": "", "length_diff": "", "text_score": "",
                     "confidence": "extract_failed", "reason": message,
                 })
             else:
-                report(82, "[DEV][ALL-BANK] 正在解析一次性 Extract 输出。")
+                report(63, COMPACT_PROGRESS_PREFIX + self.ui_text(
+                    "Extract 完成，正在生成音频清单。",
+                    "Extract completed; generating audio inventory.",
+                ))
                 records = parse_extract_template(extract_dir)
                 try:
                     for txt in extract_dir.rglob("*.txt"):
@@ -4084,22 +4480,7 @@ class MainWindow(QMainWindow):
                         })
 
                 def _music_bank_role(bank_key: str) -> str:
-                    key = (bank_key or "").lower()
-                    if "_tracks_" in key and key.startswith("r"):
-                        return "radio_tracks"
-                    if key == "glb_radio_3d.assets" or key.startswith("glb_radio_3d"):
-                        return "glb_radio_3d"
-                    if key.startswith("glb_radiopressstart"):
-                        return "press_start"
-                    if key.startswith("glb_videoplayer"):
-                        return "video_player"
-                    if key.startswith("glb_snapshots"):
-                        return "snapshot"
-                    if "cutscene" in key or "cinematic" in key or "showcase" in key:
-                        return "cinematic"
-                    if "music" in key or "radio" in key:
-                        return "music_hint"
-                    return "other"
+                    return dev_bank_role_from_key(bank_key)
 
                 def _is_music_candidate_record(rec) -> bool:
                     key = self._dev_record_bank_key(rec).lower()
@@ -4150,10 +4531,15 @@ class MainWindow(QMainWindow):
                             "avg_duration_sec": f"{float(row['total_duration_sec']) / count:.3f}",
                         })
 
-                def _station_number_for_name(name: str) -> str:
-                    for st in stations:
-                        if str(getattr(st, "name", "")) == str(name):
-                            return str(getattr(st, "number", "") or "")
+                def _station_number_for_name(name: str, xml_path: str = "") -> str:
+                    station_lists = []
+                    if xml_path and xml_path in stations_by_xml:
+                        station_lists.append(stations_by_xml.get(xml_path) or [])
+                    station_lists.extend(stations_by_xml.values())
+                    for station_list in station_lists:
+                        for st in station_list:
+                            if str(getattr(st, "name", "")) == str(name):
+                                return str(getattr(st, "number", "") or "")
                     return ""
 
                 def _target_priority_score(target: dict[str, object], rec) -> tuple[int, int, int, int]:
@@ -4161,7 +4547,7 @@ class MainWindow(QMainWindow):
                     frames = int(rec.frames or 0)
                     diff = abs(target_len - frames) if target_len and frames else 999999999
                     key = self._dev_record_bank_key(rec).lower()
-                    st_no = _station_number_for_name(str(target.get("station", ""))).lower()
+                    st_no = _station_number_for_name(str(target.get("station", "")), str(target.get("xml_path", ""))).lower()
                     role = _music_bank_role(key)
                     bank_score = 0
                     if st_no and key.startswith(f"r{st_no}_tracks"):
@@ -4227,28 +4613,134 @@ class MainWindow(QMainWindow):
                                 "note": "manual_preview_only_not_auto_mapping",
                             })
 
+                # v3.1.3: do not scan every record for every XML row.  Build
+                # searchable indexes once, then query a small candidate set per target.
+                import bisect
+                import re
+
+                report(80, COMPACT_PROGRESS_PREFIX + self.ui_text(
+                    "正在建立 XML→bank 快速匹配索引。",
+                    "Building fast XML→bank matching indexes.",
+                ))
+                token_re = re.compile(r"[0-9a-zA-Z]+")
+                ignored_tokens = {"hz6", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "id"}
+
+                def _target_tokens(text: object) -> list[str]:
+                    return [p for p in token_re.findall(str(text or "").lower()) if len(p) >= 3 and p not in ignored_tokens]
+
+                query_tokens: set[str] = set()
+                for t in target_rows:
+                    query_tokens.update(_target_tokens(t.get("sound_name", "")))
+
+                bank_tokens_by_key: dict[str, set[str]] = {}
+                for bank_key, blob in text_blob_by_key.items():
+                    # The old matcher searched a huge bank text blob once for every
+                    # target/record pair.  Tokenizing once preserves the useful hint
+                    # signal while avoiding minutes of repeated substring scanning.
+                    # Keep only tokens that can actually be queried by XML targets.
+                    bank_tokens_by_key[bank_key] = {
+                        tok for tok in token_re.findall(str(blob or "").lower())
+                        if tok in query_tokens
+                    }
+
+                indexed_records: list[dict[str, object]] = []
+                token_to_record_ids: dict[str, set[int]] = {}
+                exact_to_record_ids: dict[str, set[int]] = {}
+                frame_pairs: list[tuple[int, int]] = []
+                for rec_id, rec in enumerate(records):
+                    key = self._dev_record_bank_key(rec)
+                    small_hay = " ".join([
+                        key,
+                        str(rec.txt_relpath or ""),
+                        str(rec.extracted_name or ""),
+                        str(rec.extracted_stem or ""),
+                        str(rec.original_relpath or ""),
+                    ]).lower()
+                    rec_tokens_all = set(token_re.findall(small_hay))
+                    rec_tokens = {tok for tok in rec_tokens_all if tok in query_tokens}
+                    bank_tokens = bank_tokens_by_key.get(key, set())
+                    search_tokens = rec_tokens | bank_tokens
+                    indexed_records.append({
+                        "rec": rec,
+                        "key": key,
+                        "small_hay": small_hay,
+                        "tokens": search_tokens,
+                        "frames": int(rec.frames or 0),
+                    })
+                    for tok in search_tokens:
+                        if len(tok) >= 3:
+                            token_to_record_ids.setdefault(tok, set()).add(rec_id)
+                    # Exact hits are limited to record-local text; large bank text is
+                    # handled by token hits to avoid O(XML * bank_text) behavior.
+                    for tok in rec_tokens:
+                        exact_to_record_ids.setdefault(tok, set()).add(rec_id)
+                    frames = int(rec.frames or 0)
+                    if frames > 0:
+                        frame_pairs.append((frames, rec_id))
+                frame_pairs.sort(key=lambda x: x[0])
+                frame_values = [x[0] for x in frame_pairs]
+
+                def _length_candidate_ids(target_len: int) -> set[int]:
+                    if target_len <= 0 or not frame_pairs:
+                        return set()
+                    tolerance = max(44100 * 3, int(max(1, target_len) * 0.02))
+                    lo = bisect.bisect_left(frame_values, target_len - tolerance)
+                    hi = bisect.bisect_right(frame_values, target_len + tolerance)
+                    return {rec_id for _frames, rec_id in frame_pairs[lo:hi]}
+
+                def _score_record_for_target(target: dict[str, object], rec_id: int, parts: list[str]) -> tuple[int, int, str, object, int] | None:
+                    meta = indexed_records[rec_id]
+                    rec = meta["rec"]
+                    key = str(meta["key"])
+                    target_name = str(target.get("sound_name", "") or "").strip().lower()
+                    target_len = int(target.get("sample_length") or 0)
+                    frames = int(meta.get("frames") or 0)
+                    length_diff = abs(target_len - frames) if target_len and frames else 999999999
+                    length_ok = length_diff <= max(44100 * 3, int(max(1, target_len) * 0.02))
+                    tokens = meta.get("tokens") or set()
+                    text_score = 0
+                    # Keep a strong exact bonus only for local record fields; token
+                    # hits from bank-level txt still contribute as weaker hints.
+                    if target_name and target_name in str(meta.get("small_hay", "")):
+                        text_score += 1000
+                    for part in parts:
+                        if part in tokens:
+                            text_score += 25
+                    if not text_score and not length_ok:
+                        return None
+                    return (text_score, -length_diff, key, rec, length_diff)
+
                 total_targets = max(1, len(target_rows))
                 for idx, target in enumerate(target_rows, start=1):
-                    if idx % 25 == 0:
-                        report(82 + int(15 * idx / total_targets), f"[DEV][ALL-BANK] 匹配 XML 曲目 {idx}/{len(target_rows)}")
+                    if idx == 1 or idx % 200 == 0 or idx == len(target_rows):
+                        report(82 + int(15 * idx / total_targets), COMPACT_PROGRESS_PREFIX + self.ui_text(
+                            f"快速匹配 XML 曲目 {idx}/{len(target_rows)}。",
+                            f"Fast matching XML tracks {idx}/{len(target_rows)}.",
+                        ))
+                    target_name = str(target.get("sound_name", "") or "").strip().lower()
+                    parts = _target_tokens(target_name)
+                    candidate_ids: set[int] = set()
+                    if target_name:
+                        # Exact token seeding handles names embedded in filenames; full
+                        # substring scoring is applied below only to seeded records.
+                        for tok in _target_tokens(target_name):
+                            candidate_ids.update(exact_to_record_ids.get(tok, set()))
+                    for part in parts:
+                        candidate_ids.update(token_to_record_ids.get(part, set()))
+                    candidate_ids.update(_length_candidate_ids(int(target.get("sample_length") or 0)))
+
                     best = []
-                    target_len = int(target["sample_length"] or 0)
-                    for rec in records:
-                        key = self._dev_record_bank_key(rec)
-                        text_blob = text_blob_by_key.get(key, "")
-                        name_hay = " ".join([key, rec.txt_relpath, rec.extracted_name, rec.extracted_stem, text_blob[:200000]])
-                        text_score = self._dev_text_hit_score(str(target["sound_name"]), name_hay)
-                        length_diff = abs(target_len - int(rec.frames or 0)) if target_len and int(rec.frames or 0) else 999999999
-                        # A broad diagnostic tolerance; this is not used for actual replacement.
-                        length_ok = length_diff <= max(44100 * 3, int(max(1, target_len) * 0.02))
-                        if text_score or length_ok:
-                            best.append((text_score, -length_diff, key, rec, length_diff))
+                    for rec_id in candidate_ids:
+                        scored = _score_record_for_target(target, rec_id, parts)
+                        if scored is not None:
+                            best.append(scored)
                     best.sort(key=lambda x: (x[0], x[1]), reverse=True)
                     summary = station_summary.get(str(target["station"]))
                     if not best:
                         if summary is not None:
                             summary["no_candidate_targets"] = int(summary["no_candidate_targets"]) + 1
                         rows_out.append({
+                            "xml_file": target.get("xml_file", ""),
                             "station": target["station"],
                             "target_slot": target["slot_index"],
                             "target_sound_name": target["sound_name"],
@@ -4262,7 +4754,7 @@ class MainWindow(QMainWindow):
                             "length_diff": "",
                             "text_score": "",
                             "confidence": "no_candidate",
-                            "reason": "no name or length candidate in cached all-bank extract",
+                            "reason": "no indexed name or length candidate in cached all-bank extract",
                         })
                         continue
                     if summary is not None:
@@ -4276,6 +4768,7 @@ class MainWindow(QMainWindow):
                     for rank, (text_score, _negdiff, key, rec, length_diff) in enumerate(best[:8], start=1):
                         confidence = "name_hit" if text_score >= 1000 else ("text_hint" if text_score else "length_candidate")
                         rows_out.append({
+                            "xml_file": target.get("xml_file", ""),
                             "station": target["station"],
                             "target_slot": target["slot_index"],
                             "target_sound_name": target["sound_name"],
@@ -4289,11 +4782,15 @@ class MainWindow(QMainWindow):
                             "length_diff": length_diff,
                             "text_score": text_score,
                             "confidence": confidence,
-                            "reason": "candidate from one-shot cached all-bank extract",
+                            "reason": "candidate from indexed cached all-bank extract",
                         })
 
+            report(82, COMPACT_PROGRESS_PREFIX + self.ui_text(
+                "正在写入 CSV 统计表和 XML→bank 映射表。",
+                "Writing CSV statistics and XML→bank mapping tables.",
+            ))
             report_path = out_root / "dev_all_station_soundname_search.csv"
-            fields = ["station", "target_slot", "target_sound_name", "target_display_name", "candidate_rank", "candidate_bank", "candidate_sound_file", "candidate_frames", "candidate_samplerate", "candidate_duration_sec", "length_diff", "text_score", "confidence", "reason"]
+            fields = ["xml_file", "station", "target_slot", "target_sound_name", "target_display_name", "candidate_rank", "candidate_bank", "candidate_sound_file", "candidate_frames", "candidate_samplerate", "candidate_duration_sec", "length_diff", "text_score", "confidence", "reason"]
             with report_path.open("w", encoding="utf-8-sig", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=fields)
                 writer.writeheader()
@@ -4301,7 +4798,7 @@ class MainWindow(QMainWindow):
 
             target_path = out_root / "target_all_station_soundnames.csv"
             with target_path.open("w", encoding="utf-8-sig", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=["station", "slot_index", "sound_name", "display_name", "artist", "sample_length", "sample_rate"])
+                writer = csv.DictWriter(f, fieldnames=["xml_file", "xml_path", "station", "slot_index", "sound_name", "display_name", "artist", "sample_length", "sample_rate"])
                 writer.writeheader()
                 writer.writerows(target_rows)
 
@@ -4312,15 +4809,120 @@ class MainWindow(QMainWindow):
                 writer.writeheader()
                 writer.writerows(station_summary.values())
 
+            # Developer-facing XML -> bank mapping table.  This is a research aid,
+            # not an automatic replacement source of truth.
+            xml_map_path = out_root / "xml_to_bank_mapping.csv"
+            map_fields = [
+                "xml_file", "station", "slot_index", "sound_name", "display_name",
+                "artist", "sample_length", "candidate_rank", "candidate_bank",
+                "candidate_bank_role", "candidate_sound_file", "candidate_frames",
+                "candidate_duration_sec", "length_diff", "text_score", "confidence", "note"
+            ]
+            target_by_key = {
+                (str(t.get("xml_file", "")), str(t.get("station", "")), str(t.get("slot_index", "")), str(t.get("sound_name", ""))): t
+                for t in target_rows
+            }
+            with xml_map_path.open("w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=map_fields)
+                writer.writeheader()
+                for r in rows_out:
+                    key = (str(r.get("xml_file", "")), str(r.get("station", "")), str(r.get("target_slot", "")), str(r.get("target_sound_name", "")))
+                    t = target_by_key.get(key, {})
+                    bank_key = str(r.get("candidate_bank", ""))
+                    writer.writerow({
+                        "xml_file": r.get("xml_file", ""),
+                        "station": r.get("station", ""),
+                        "slot_index": r.get("target_slot", ""),
+                        "sound_name": r.get("target_sound_name", ""),
+                        "display_name": r.get("target_display_name", ""),
+                        "artist": t.get("artist", ""),
+                        "sample_length": t.get("sample_length", ""),
+                        "candidate_rank": r.get("candidate_rank", ""),
+                        "candidate_bank": bank_key,
+                        "candidate_bank_role": dev_bank_role_from_key(bank_key),
+                        "candidate_sound_file": r.get("candidate_sound_file", ""),
+                        "candidate_frames": r.get("candidate_frames", ""),
+                        "candidate_duration_sec": r.get("candidate_duration_sec", ""),
+                        "length_diff": r.get("length_diff", ""),
+                        "text_score": r.get("text_score", ""),
+                        "confidence": r.get("confidence", ""),
+                        "note": r.get("reason", ""),
+                    })
+
+            # All-bank statistics table: includes banks that failed precheck, banks
+            # that extracted but produced no wav/txt, and banks that produced audio.
+            status_by_path: dict[str, dict[str, object]] = {}
+            try:
+                status_path = out_root / "bank_extract_status.csv"
+                if status_path.exists():
+                    with status_path.open("r", encoding="utf-8-sig", newline="") as f:
+                        for row in csv.DictReader(f):
+                            status_by_path[str(row.get("bank_path", "")).lower()] = dict(row)
+            except Exception:
+                status_by_path = {}
+            sound_stats: dict[str, dict[str, object]] = {}
+            for rec in records or []:
+                key = self._dev_record_bank_key(rec)
+                row = sound_stats.setdefault(key, {"sound_count": 0, "long_audio_count": 0, "min_duration_sec": 999999.0, "max_duration_sec": 0.0, "total_duration_sec": 0.0})
+                dur = float(getattr(rec, "duration_sec", 0) or 0)
+                row["sound_count"] = int(row["sound_count"]) + 1
+                row["long_audio_count"] = int(row["long_audio_count"]) + (1 if dur >= 30.0 else 0)
+                row["min_duration_sec"] = min(float(row["min_duration_sec"]), dur)
+                row["max_duration_sec"] = max(float(row["max_duration_sec"]), dur)
+                row["total_duration_sec"] = float(row["total_duration_sec"]) + dur
+            precheck_by_path = {str(r.get("bank_path", "")).lower(): r for r in bank_precheck_rows}
+            all_stats_path = out_root / "all_bank_extract_statistics.csv"
+            stat_fields = [
+                "bank_name", "bank_key", "bank_role", "bank_path", "size_mb",
+                "precheck_has_fsb", "extract_status", "sound_count", "long_audio_count",
+                "min_duration_sec", "max_duration_sec", "avg_duration_sec", "error"
+            ]
+            with all_stats_path.open("w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=stat_fields)
+                writer.writeheader()
+                for b in all_banks:
+                    path_key = str(b).lower()
+                    pre = precheck_by_path.get(path_key, {})
+                    status = status_by_path.get(path_key, {})
+                    key = b.stem.lower()
+                    stat = sound_stats.get(key, {})
+                    count = int(stat.get("sound_count", 0) or 0)
+                    total = float(stat.get("total_duration_sec", 0.0) or 0.0)
+                    min_d = float(stat.get("min_duration_sec", 0.0) or 0.0) if count else 0.0
+                    max_d = float(stat.get("max_duration_sec", 0.0) or 0.0) if count else 0.0
+                    try:
+                        size_mb = f"{(b.stat().st_size / 1024 / 1024):.3f}"
+                    except Exception:
+                        size_mb = str(pre.get("size_mb", ""))
+                    writer.writerow({
+                        "bank_name": b.name,
+                        "bank_key": key,
+                        "bank_role": dev_bank_role_from_key(key),
+                        "bank_path": str(b),
+                        "size_mb": size_mb,
+                        "precheck_has_fsb": pre.get("precheck_has_fsb", ""),
+                        "extract_status": status.get("status", "not_extractable_or_skipped"),
+                        "sound_count": count,
+                        "long_audio_count": int(stat.get("long_audio_count", 0) or 0),
+                        "min_duration_sec": f"{min_d:.3f}",
+                        "max_duration_sec": f"{max_d:.3f}",
+                        "avg_duration_sec": f"{(total / count):.3f}" if count else "0.000",
+                        "error": status.get("error", pre.get("precheck_error", "")),
+                    })
+
+            report(98, COMPACT_PROGRESS_PREFIX + self.ui_text(
+                "报告生成完成，正在收尾。",
+                "Reports generated; finishing up.",
+            ))
             return str(report_path)
 
         def done(path):
             self.log(f"[DEV][OK] 全电台全 Bank 音频扫描完成：{path}")
             self.info_box(
                 "全电台扫描完成",
-                f"已生成报告：\n{path}\n\n同目录还包含 target_all_station_soundnames.csv、fmod_all_bank_audio_inventory.csv、bank_extract_status.csv、music_bank_inventory.csv、missing_track_candidate_shortlist.csv 和 dev_all_station_soundname_summary.csv。",
+                f"已生成报告：\n{path}\n\n同目录还包含 target_all_station_soundnames.csv、fmod_all_bank_audio_inventory.csv、bank_extract_status.csv、all_bank_extract_statistics.csv、xml_to_bank_mapping.csv、music_bank_inventory.csv、missing_track_candidate_shortlist.csv 和 dev_all_station_soundname_summary.csv。",
                 "All-station scan finished",
-                f"Report generated:\n{path}\n\nThe same folder also contains target_all_station_soundnames.csv, fmod_all_bank_audio_inventory.csv, bank_extract_status.csv, music_bank_inventory.csv, missing_track_candidate_shortlist.csv, and dev_all_station_soundname_summary.csv.",
+                f"Report generated:\n{path}\n\nThe same folder also contains target_all_station_soundnames.csv, fmod_all_bank_audio_inventory.csv, bank_extract_status.csv, all_bank_extract_statistics.csv, xml_to_bank_mapping.csv, music_bank_inventory.csv, missing_track_candidate_shortlist.csv, and dev_all_station_soundname_summary.csv.",
             )
 
         self.run_background_task("开发测试：全电台全 Bank 音频扫描", job, done, estimated="首次会分批 Extract 所有可提取 bank，之后会复用缓存。仅用于开发诊断。")
@@ -4941,7 +5543,7 @@ class MainWindow(QMainWindow):
             copy_banks_to_tool_bank_dir([game_by_name[bank_name]], layout, clean_bank_dir=True)
             subset = self._subset_fmod_ready_workspace_for_bank(fmod_ready, bank_name, fmod_dir / f"rebuild_wav_{idx:02d}_{safe_stem(bank_name, 80)}")
             rebuild_manifest = fmod_dir / f"{phase_label.lower()}_rebuild_{idx:02d}.json"
-            prep_rebuild = prepare_rebuild_job(tool, subset, rebuild_manifest)
+            prep_rebuild = prepare_rebuild_job(tool, subset, rebuild_manifest, cpu_threads=self._fmod_cpu_threads())
             if not prep_rebuild.layout:
                 raise RuntimeError(f"Fmod Rebuild 工作目录准备失败：{bank_name}")
             rebuild_res = launch_trigger_and_wait(
@@ -5330,7 +5932,7 @@ class MainWindow(QMainWindow):
             fmod_dir = self._fmod_auto_dir()
             report(3, "[MENU] 准备 Fmod Extract 工作目录。")
             extract_manifest = fmod_dir / "main_menu_extract_manifest.json"
-            prep_extract = prepare_extract_job(tool, [selected_bank], extract_manifest, search_root=selected_bank.parent)
+            prep_extract = prepare_extract_job(tool, [selected_bank], extract_manifest, search_root=selected_bank.parent, cpu_threads=self._fmod_cpu_threads())
             if not prep_extract.layout or not prep_extract.ok:
                 raise RuntimeError(prep_extract.message or "主菜单 Fmod Extract 工作目录准备失败。")
             actual_bank_names = [Path(p).name for p in (prep_extract.output_files or [])]
@@ -5468,7 +6070,7 @@ class MainWindow(QMainWindow):
 
             report(2, "[PACKAGE] 准备 Fmod Extract 工作目录。")
             extract_manifest = fmod_dir / "package_extract_manifest.json"
-            prep_extract = prepare_extract_job(tool, banks, extract_manifest, search_root=bank_root, preferred_tokens=station_tokens)
+            prep_extract = prepare_extract_job(tool, banks, extract_manifest, search_root=bank_root, preferred_tokens=station_tokens, cpu_threads=self._fmod_cpu_threads())
             if not prep_extract.layout or not prep_extract.ok:
                 raise RuntimeError(prep_extract.message or "Fmod Extract 工作目录准备失败。")
             actual_bank_names = [Path(p).name for p in (prep_extract.output_files or [])]
@@ -5594,7 +6196,7 @@ class MainWindow(QMainWindow):
 
             report(2, "[ONE-CLICK] 准备 Fmod Extract 工作目录。")
             extract_manifest = fmod_dir / "one_click_extract_manifest.json"
-            prep_extract = prepare_extract_job(tool, banks, extract_manifest, search_root=bank_root, preferred_tokens=station_tokens)
+            prep_extract = prepare_extract_job(tool, banks, extract_manifest, search_root=bank_root, preferred_tokens=station_tokens, cpu_threads=self._fmod_cpu_threads())
             if not prep_extract.layout or not prep_extract.ok:
                 raise RuntimeError(prep_extract.message or "Fmod Extract 工作目录准备失败。")
             actual_bank_names = [Path(p).name for p in (prep_extract.output_files or [])]

@@ -12,7 +12,7 @@ echo Output:
 echo   dist_release\FH6_Radio_Tool_v*_nexus_exe_portable.zip
 echo.
 echo Notes:
-echo   - This is the recommended builder for v3.0.38.
+echo   - This is the recommended builder for v3.1.3.
 echo   - Run this on native Windows, not WSL/Linux.
 echo   - Fmod Bank Tools is NOT bundled. Players select their own exe.
 echo   - The final ZIP contains no loose .ico, source folder, or nested archive.

@@ -9,7 +9,7 @@ from typing import Any
 
 from .runtime_tools import runtime_root
 
-APP_VERSION = "3.0.38"
+APP_VERSION = "3.1.3"
 DB_FILE_NAME = "fh6_radio_tool_v2.sqlite3"
 
 
