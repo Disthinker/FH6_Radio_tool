@@ -1,275 +1,224 @@
 # FH6 Radio Tool
 
-### v3.1.3 Developer matching performance hotfix
+FH6 Radio Tool 是一个用于《Forza Horizon 6》电台音乐替换的 Windows 桌面工具。它基于 Python / PySide6 开发，重点是让普通玩家可以用自己的音乐替换游戏电台歌曲，并尽量减少手工编辑 XML、手动转换音频和手动管理备份的成本。
 
-- 优化开发者模式全 Bank Extract 之后的 XML → bank 匹配阶段。
-- 原流程会对每个 XML 曲目遍历所有 FMOD 记录并反复扫描大文本，3180 条曲目时会非常慢；新版改为一次性建立 token / 时长索引，再对每个曲目只检查小候选集。
-- 保留已有“删除旧记录重新测试 / 保留并继续 / 取消”提示。
+当前版本：`v3.1.4-dev`
 
+## 功能概览
 
-## v3.0.27 正式版整理 / Release cleanup
+- 扫描游戏目录，自动定位 `RadioInfo_*.xml` 和 `media/Audio/FMODBanks`。
+- 选择电台和原曲槽位，将自定义音乐分配到指定 slot。
+- 自动准备替换音频，统一输出为适合 FMOD rebuild 的 WAV。
+- 编辑、试听、导入、导出 TrackDrop / PostDrop / Loop marker。
+- 生成 patched XML 和 `fmod_ready_wav` rebuild 工作区。
+- 自动调用 Fmod Bank Tools 执行 Extract / Rebuild。
+- 生成 Mod 输出包，或一键备份并替换游戏文件。
+- 支持主菜单 / Press Start 音乐替换：`GLB_RadioPressStart.assets.bank`。
+- 提供开发者模式，用于全 bank Extract、统计和 XML-bank 映射研究。
 
-- 移除临时开发测试按钮，普通用户界面更简洁。
-- 优化 Marker 参数区按钮布局，避免按钮堆叠拥挤。
-- 保留已验证的多 Track bank 替换、跨语言 RadioInfo 同步、安全 Marker、备份恢复状态清理等正式功能。
+## v3.1.4-dev 更新重点
 
+相比 `v3.1.3`，`v3.1.4-dev` 主要修复用户反馈的稳定性和 marker/audio 问题：
 
-## v2.7.22 - Dev all-station mapping test / preview audio fix
+- Marker Export / Import 现在会导出当前已分配音乐的完整配置，可作为批量编辑模板。
+- Export 会同步当前 UI 中尚未保存的 marker 数值。
+- 播放器改为 Play / Pause / Resume / Reset 语义，暂停不再清零。
+- 进度条和波形支持点击、拖动 seek。
+- 波形上显示 TrackDrop / PostDrop 竖线，以及 TrackLoop / PostRaceLoop 区间。
+- XML 写入前会读取最终 `fmod_ready_wav` 的真实 sample length。
+- 如果转换前后 sample 数变化，marker 会按比例缩放到最终 WAV 坐标系。
+- `SampleLength`、`End` 和已存在的 duration-like 字段会使用最终 WAV 的真实值。
+- 同一 `SoundName` 的重复 XML 节点会同步更新，减少改错节点导致的游戏内偏移。
+- 音频导入统一标准化为 PCM WAV、48000 Hz、Stereo、16-bit。
+- 增加响度匹配、峰值保护和 Runtime Log 音频处理报告。
+- 修复 Fmod Extract 模板或外部工具窗口文本为空时可能出现的 `NoneType.strip` 崩溃。
 
-- Added a temporary developer-only all-radio station matching test button. It runs Extract per radio station and writes `work/dev_all_station_match_test/dev_all_station_match_summary.csv`.
-- Fixed bounded preview audio quality: fade-in is now applied only at the real preview start instead of every streaming chunk.
-- Relaxed loop preview validation so LoopStart may be earlier than the preview window, which is required to preview loop jumps correctly.
-- Added XML-only/no-FMOD-audio skip handling for trailing metadata-only radio rows so they do not block valid playable slots or generate misleading renamed-but-not-replaced entries.
+## 环境要求
 
-# FH6 Radio Tool v2.7.22
+- Windows 10 / 11。
+- Python 3.10 或更新版本，用于源码运行。
+- Fmod Bank Tools，需要用户自行下载并在工具中选择 `Fmod_Bank_Tools.exe`。
+- 足够的磁盘空间用于 Extract / Rebuild 输出和备份。
 
-This is a hotfix release for the v2.7.9 startup crash.
+依赖见 [requirements.txt](requirements.txt)：
 
-这是用于修复 v2.7.9 启动崩溃的热修复版本。
+- `PySide6`
+- `pywinauto`
+- `imageio-ffmpeg`
 
+`setup_env.bat` 会创建 `.venv` 并安装依赖。`imageio-ffmpeg` 通常会提供可用的 FFmpeg，无需用户手动配置 PATH。
 
-## 免安装 EXE 打包 / EXE Portable Build
+## 快速开始
 
-开发者在 Windows 中运行：
+1. 将项目解压或 clone 到简单路径，例如 `E:\FH6RadioTool`。
+2. 首次运行：
 
-```bat
-build_portable_release.bat
-```
+   ```bat
+   setup_env.bat
+   ```
 
-该脚本会生成真正的免安装 EXE 目录版：
+3. 启动工具：
+
+   ```bat
+   run_tool.bat
+   ```
+
+4. 在工具中选择游戏根目录和音乐目录。
+5. 选择目标电台，勾选要替换的原曲 slot。
+6. 勾选相同数量的自定义音乐，点击应用替换。
+7. 试听并调整 marker，必要时导入或导出 marker CSV。
+8. 选择最终操作：
+   - 生成 Mod 包：只生成输出文件，不覆盖游戏。
+   - 一键替换到游戏：自动备份后覆盖 XML 和 bank。
+
+## 常用工作流程
+
+### 普通电台音乐替换
+
+1. 扫描游戏目录。
+2. 扫描音乐目录。
+3. 选择电台和 slot。
+4. 应用替换。
+5. 编辑 marker。
+6. 生成 Mod 包或一键替换。
+
+工具会在流程中准备音频、生成 XML、创建 `fmod_ready_wav`，并调用 Fmod Bank Tools 进行 Extract / Rebuild。
+
+### Marker 批量编辑
+
+1. 在工具中分配歌曲。
+2. 点击 Export markers / 导出 Marker。
+3. 使用 Excel、WPS 或 LibreOffice 编辑 CSV。
+4. 点击 Import markers / 导入 Marker。
+5. 检查 UI 中 marker 是否刷新。
+6. 再次导出或生成包。
+
+CSV 默认使用 UTF-8-SIG 编码，marker 单位为 samples。
+
+### 主菜单音乐替换
+
+主菜单 / Press Start 音乐目标固定为：
 
 ```text
-dist_release/FH6_Radio_Tool_v2.7.22_exe_portable.zip
+GLB_RadioPressStart.assets.bank
 ```
 
-玩家解压后双击 `FH6RadioTool.exe` 即可运行。Fmod Bank Tools 仍然需要用户自行选择外部 exe，工具不会内置或分发它。
+用户只需要选择新的主菜单音乐文件。工具会根据游戏根目录自动定位目标 bank，并执行生成包或一键替换流程。
 
+### 开发者模式
 
-## New in v2.7.16
+开发者模式用于研究音频 bank 结构，不建议普通玩家日常使用。它可以：
 
-- Rolled the code base back to the stable v2.7.11 line before applying focused UI/Loop fixes.
-- Fixed the target radio combo box width after the first game-root scan.
-- Changed Loop analysis default action to batch-analyze all scanned songs.
-- Added **Save all audio settings / 保存全部音频设置** so users no longer need to save one song at a time.
-- Updated safe default markers for normal songs:
-  - `TrackDrop = 0`
-  - `PostDrop = 0`
-  - `TrackLoopStart = 0`
-  - `PostRaceLoopStart = 0`
-  - `TrackLoopEnd` and `PostRaceLoopEnd` remain unset until a candidate/import is applied.
-- `build_portable_release.bat` now builds a real PyInstaller one-folder EXE portable package instead of only zipping the source tree.
+- Extract 全部候选 bank。
+- 生成 bank 音频统计。
+- 生成 XML 到 bank / sound 的映射 CSV。
+- 分析 DJ、stinger、音效和跨 bank 关系。
 
-## v2.7.16 中文说明
+## 音频处理说明
 
-- 以稳定的 v2.7.11 为基线回退后，只合入明确的 UI / Loop 功能修复。
-- 修复第一次设置游戏根目录后“目标电台”下拉框宽度异常的问题。
-- Loop 分析默认改为批量分析当前音乐目录中的全部歌曲。
-- 新增 **保存全部音频设置**，避免每次只能保存一首歌。
-- 调整普通歌曲安全默认 Marker：
-  - `TrackDrop = 0`
-  - `PostDrop = 0`
-  - `TrackLoopStart = 0`
-  - `PostRaceLoopStart = 0`
-  - `TrackLoopEnd` / `PostRaceLoopEnd` 默认保持未设置，等用户应用候选或导入 Marker 后再写入。
-- 新增 `build_portable_release.bat` 作为当前正式稳定打包脚本；Nuitka standalone 暂缓为实验方向。
+导入音频会被统一处理为：
 
-### FFmpeg note
+```text
+PCM WAV
+48000 Hz
+Stereo
+16-bit
+```
 
-Starting from v2.7.6, `setup_env.bat` installs `imageio-ffmpeg`, which provides a bundled FFmpeg binary for audio conversion. In most cases, users do not need to manually add `ffmpeg.exe` to the system PATH. If the tool still reports FFmpeg missing, run `setup_env.bat` again.
+工具会分析源音频响度和峰值，应用安全增益，并在最终替换到 `fmod_ready_wav` 时对照原始 FMOD 提取音频进行轻量响度匹配。处理结果会写入 Runtime Log 和 `work/volume_match_report.csv`。
 
-### FFmpeg 说明
+支持 FFmpeg 可读取的常见格式，例如 WAV、FLAC、MP3、M4A、AAC、OGG、WMA。
 
-从 v2.7.6 开始，`setup_env.bat` 会安装 `imageio-ffmpeg`，用于自动提供音频转换所需的 FFmpeg。通常不再需要用户手动把 `ffmpeg.exe` 加入系统 PATH。如果仍提示找不到 FFmpeg，请重新运行 `setup_env.bat`。
+## Marker 与 XML 写入说明
 
+工具内部 marker 使用 sample 坐标。生成 XML 前，工具会以最终 prepared / ready WAV 为准重新计算：
 
-## Installation / 安装启动
+- `TrackDrop`
+- `PostDrop`
+- `TrackLoopStart`
+- `TrackLoopEnd`
+- `PostRaceLoopStart`
+- `PostRaceLoopEnd`
+- `End`
 
-This package uses batch scripts for setup and launch:
+如果源音频和最终 WAV 的 sample length 不一致，工具会按比例缩放 marker，避免游戏内 loop 起点、终点和工具内试听位置明显不一致。
 
-1. Run `setup_env.bat` once to create `.venv` and install dependencies.
-2. Run `run_tool.bat` to start FH6 Radio Tool.
-3. Run `cleanup_env.bat` only if you want to remove the local environment.
+## 输出目录
 
-本发布包使用批处理脚本安装与启动：
+常见生成目录：
 
-1. 首次运行 `setup_env.bat` 创建 `.venv` 并安装依赖。
-2. 之后运行 `run_tool.bat` 启动工具。
-3. 如需清理本地运行环境，可运行 `cleanup_env.bat`。
+- `output/`：最终输出 XML、ready WAV、rebuild bank、manifest。
+- `work/`：中间文件、诊断报告、映射 CSV、运行数据库。
+- `backup/`：一键替换和手动备份产生的恢复点。
+- `dist_release/`：打包脚本生成的发布包。
 
+这些目录属于本地生成内容，默认不会提交到 Git。
 
-FH6 Radio Tool is a community tool for simplifying custom radio music replacement in Forza Horizon 6. The tool helps users scan game files, select radio tracks, replace selected songs, adjust loop markers, generate a mod output package, and optionally run a safer one-click replacement workflow with backup and restore support.
+## 构建
 
-## Quick Start
+推荐优先使用 PyInstaller 打包：
 
-1. Install **Python 3.10 or newer**.
-2. Extract this package to a simple path, for example `E:\FH6RadioTool`.
-3. Run `setup_env.bat` once.
-4. Run `run_tool.bat`.
-5. Select your FH6 game root folder and your music folder.
-6. Select a radio station, tick the original slots to replace, tick the same number of custom music files, then click **Apply Selected Replacement**.
-7. Set or import loop marker parameters if needed.
-8. Choose one final action:
-   - **Generate Mod Output Package**: generate patched XML and rebuilt bank files in the `output` folder without overwriting the game.
-   - **One-Click Replace Game Files**: automatically back up the original XML/bank files, then replace them.
+```bat
+build_pyinstaller_release.bat
+```
 
-## New in v2.7.8
+Nuitka 构建脚本仍保留，用于实验或备用：
 
-- Added two-level backup strategy: initial-state backup plus point-in-time backup points.
-- Added restore options for either initial state or a selected backup manifest.
+```bat
+build_nuitka_release.bat
+```
 
-- Added Marker reference documentation explaining TrackDrop, PostDrop, DJSegment, StingerStart, and DJStart.
-- Added separate English and Chinese Marker reference pages in `docs/`.
-- Fixed English UI text clipping by relaxing overly fixed button sizes.
-- Fixed the finish scene preview issue where playback could jump to the end immediately.
-- Reorganized Marker parameters into clearer rows:
-  - TrackStart / TrackDrop / PostDrop
-  - TrackLoopStart / TrackLoopEnd
-  - PostRaceLoopStart / PostRaceLoopEnd
-  - DJSegment / StingerStart / DJStart
-  - End
-- Added batch Marker import from CSV or JSON.
-- Added Marker import template export.
-- Added an example import CSV converted from the provided song marker spreadsheet.
+源码包构建：
 
-## Marker Import Format
+```bat
+build_source_release.bat
+```
 
-Marker import currently supports CSV and JSON. The recommended format is CSV.
+构建产物默认输出到 `dist_release/`，不会提交到仓库。
 
-Example files are included in:
+## 故障排查
 
-- `docs/examples/marker_import_template.csv`
-- `docs/examples/marker_import_from_uploaded_song_samples.csv`
+### 找不到 FFmpeg
 
-Important columns:
+先重新运行：
 
-- `MatchName`, `Filename`, or `DisplayName`: used to match rows to music files in your selected music folder.
-- `SampleRate`, `SampleLength`: optional metadata and fallback matching information.
-- Marker columns: `TrackStart`, `TrackDrop`, `TrackLoopStart`, `TrackLoopEnd`, `PostDrop`, `PostRaceLoopStart`, `PostRaceLoopEnd`, `DJSegment`, `StingerStart`, `DJStart`, `End`.
+```bat
+setup_env.bat
+```
 
-The importer first matches by filename/display name, then falls back to unique `SampleLength` matching when possible.
+如果仍失败，可以在系统 PATH 中安装 FFmpeg，或在工具设置中选择自己的 `ffmpeg.exe`。
 
-## Required External Tool
+### Fmod Bank Tools 没有自动点击 Extract / Rebuild
 
-This package does **not** include Fmod Bank Tools. To use Extract/Rebuild automation, download Fmod Bank Tools separately and select its `Fmod_Bank_Tools.exe` path in FH6 Radio Tool.
+- 确认选择的是 `Fmod_Bank_Tools.exe`。
+- 不要在 Extract / Rebuild 过程中关闭 Fmod Bank Tools。
+- 如果自动点击失败，请查看 Runtime Log 中的 Win32 / pywinauto 提示。
 
-Fmod Bank Tools is treated as an external program. FH6 Radio Tool only prepares its working folders/config and attempts to automate its GUI.
+### 生成包失败但游戏文件未被覆盖
 
-## Important Notes
+这是预期保护行为。工具会先完成 Extract / XML / Rebuild 校验，再执行覆盖。若中途失败，请查看 Runtime Log 和 `work/` 中的诊断报告。
 
-- Always keep a backup of your original game files.
-- Automatic loop candidate detection is experimental. Manual listening and marker adjustment are still recommended.
-- Some `CU1` banks may contain no extractable FSB audio; the tool may automatically switch to a same-station extractable bank.
-- Use short, simple paths when possible, such as `E:\FH6RadioTool`, `E:\Music`, and `E:\FmodBankTool`.
+### 游戏内播放位置与工具试听不一致
 
-## Documentation
+请使用 `v3.1.4-dev` 或更新版本重新生成。新版会在写 XML 前按最终 WAV sample length 缩放 marker，并同步 `SampleLength` / `End`。
 
-- Chinese guide: `docs/User_Guide_ZH.md`
-- Chinese marker reference: `docs/Marker_Reference_ZH.md`
-- English guide: `docs/User_Guide_EN.md`
-- English marker reference: `docs/Marker_Reference_EN.md`
-- Third-party license notes: `docs/THIRD_PARTY_LICENSES.md`
+## 文档
 
-## v2.7.x Notes
-
-- The Marker parameter panel was adjusted so labels and input boxes are paired more clearly.
-- The user music list now includes an editable Artist column. The value is saved per track and used when writing XML display information.
-- The export button is now named Export markers / 导出 Marker.
-
-
-## Marker Documentation Update
-
-- Added explanations for less obvious marker fields such as `TrackDrop`, `PostDrop`, `DJSegment`, `StingerStart`, and `DJStart`.
-- Added practical marker placement recommendations for normal custom song replacement.
-
-## Backup strategy
-
-Starting from v2.7.8, the tool uses a two-level backup strategy:
-
-- **Initial state backup**: the first time the tool touches a game XML or bank file, it stores a baseline copy. This lets users restore the files back to the earliest state captured by the tool. To save disk space, only touched XML/bank files are copied, not the whole game folder.
-- **Backup points**: before each one-click replacement or manual backup, the tool also creates a point-in-time backup. Users can restore a specific backup point if they want to go back to the state before a certain modification.
-
-If the game was already modified before the first backup, the initial state captured by the tool will be that already-modified state. For the best result, create a backup before the first replacement.
-
-## v2.7.15 Packaging Fix
-
-- Fixed the portable release builder error caused by literal `^` characters being passed to PowerShell.
-- 打包脚本已修复：不再把批处理转义符 `^` 传给 PowerShell，避免清理缓存和 #Uxxxx 检查误报。
-
-### v2.7.21 user-feedback fixes
-
-This build adds safer XML metadata validation, bank/extract diagnostics, No Loop / Safe Marker buttons, final WAV SampleLength checks, and safer loop preview range handling. If a selected slot cannot be safely mapped to an FMOD extracted WAV, generation stops before XML/Rebuild/overwrite.
-
-
-
-## v3.0.12 Restore State Fix
-
-- Restoring a backup or initial state now also clears pending in-tool replacement assignments.
-- Old `current_assignment_mapping.csv` / replacement plan caches are removed after restore to prevent stale changes from being applied again on the next one-click replacement.
-
-
-
-## v3.0.16
-
-- Rolled back the unverified R1 -> GLB_Radio_3D cross-bank replacement mapping. User listening tests showed those candidates were incorrect.
-- R1/Horizon Pulse slot 30/32 are now hidden from normal replacement again until their real bank/sound locations are confirmed.
-- Cleared the default `config/known_cross_bank_music_map.csv` so no wrong GLB_Radio_3D mapping is applied automatically.
-- Developer all-bank scan remains available for locating the real audio source before cross-bank replacement is re-enabled.
-
-
-## v3.0.19
-
-- Multi-track-bank station model: each radio station can use multiple `R*_Tracks_*` banks, such as `R1_Tracks_CU1` plus `R1_Tracks_Disk`.
-- Fixes R1/R2 slot limits caused by earlier CU1-only scanning.
-- Old diagnostic slot-profile files no longer hide R1/R2 Disk-bank songs.
-
-
-## v3.0.19 - Station Track Bank Search Order
-
-- Improved radio-bank matching: the tool now searches the current station main Track bank first, then other same-station `R*_Tracks_*` banks such as `Disk` or `CU2`, and only then treats `GLB_Radio_3D` as a low-confidence candidate source when available.
-- Same-station `R*_Tracks_Disk` / `R*_Tracks_CU2` banks are now collected automatically from FMODBanks even if the RadioInfo XML bank list is incomplete.
-- This is intended to support stations whose playable songs are split across multiple bank files, while avoiding accidental matches from unrelated stations.
-
-
-## v3.0.38
-
-- Added the official application icon to the PyInstaller EXE build.
-- The main window also uses the bundled icon when running from source or from the portable EXE package.
-
-## v3.0.34 main menu / press-start music replacement
-
-The main menu music target is now fixed to `GLB_RadioPressStart.assets.bank`.
-Users do not need to choose the bank manually. After selecting the FH6 game root, choose only the replacement audio file in the optional main-menu music panel. The tool will automatically find the bank under `media/Audio/FMODBanks`, replace its single music entry, and then either generate a mod package or perform one-click replacement with backup.
-
-主菜单 / Press Start 音乐目标已固定为 `GLB_RadioPressStart.assets.bank`。用户不再需要手动选择 bank。选择 FH6 游戏根目录后，只需要在主菜单音乐区域选择想替换进去的音乐文件，工具会自动从 `media/Audio/FMODBanks` 定位该 bank，替换其中唯一音乐音频，然后生成 Mod 包或一键替换并自动备份。
-
-
-
-## v3.0.34 hotfix
-
-- Fixed the misleading v3.0.33 automation prompt that asked portable EXE users to run `setup_env.bat` even though the Nexus/Nuitka package does not include it.
-- The Nuitka builder now treats `pywinauto`/Win32 automation dependencies as required and includes the relevant packages more aggressively.
-- The Nexus Nuitka package no longer bundles a separate `tools/ffmpeg.exe` by default, reducing quarantine risk.
-
-## v3.0.38 hotfix
-
-- Removed the obsolete user-facing **Auto-control Fmod Bank Tools** checkbox from the normal workflow.
-- One-click replacement, package generation, and main-menu music replacement now force Fmod Bank Tools automation internally.
-- Fixed the legacy path where unchecking the old option could still show a misleading `setup_env.bat` / `pywinauto` prompt in the portable EXE.
-- Portable EXE users should not use old v2 `setup_env.bat` files to repair the compiled program; update to v3.0.38 or newer instead.
-
-
-## v3.0.38 build hotfix
-
-- Fixed PyInstaller BAT build failure where `build_pyinstaller\app.ico` was deleted by the clean step before PyInstaller copied it into the EXE.
-- The builder now regenerates the temporary icon after cleaning, and falls back to a no-custom-icon build if icon generation fails.
-- Use `build_pyinstaller_release.bat` from this package; do not reuse older v3.0.30/v3.0.36 build folders.
-
-### v3.0.40 UI polish
-
-- Fixes station selector slot-count labels to match the actually selectable/replaceable slot table.
-- Adds Chinese/English switching for the new developer-mode controls and hints.
-
-### v3.0.39 Developer Mode
-
-Step 3 now includes an Audio Research Developer Mode. It can extract all candidate FMOD bank files, generate an all-bank statistics CSV, and generate an XML-to-bank mapping CSV for researching DJ lines, stingers, sound effects, and station structure. The thread limit setting shows the local logical CPU count and a recommended safe maximum. Fmod Bank Tools GUI extraction remains serialized, while precheck/statistics work is bounded by the selected thread limit.
-
+- [中文使用指南](docs/User_Guide_ZH.md)
+- [English User Guide](docs/User_Guide_EN.md)
+- [中文 Marker 参考](docs/Marker_Reference_ZH.md)
+- [English Marker Reference](docs/Marker_Reference_EN.md)
+- [第三方许可说明](docs/THIRD_PARTY_LICENSES.md)
+
+## 注意事项
+
+- 本工具不会分发 Fmod Bank Tools，也不会内置游戏文件。
+- 替换游戏文件前请确认已有备份。
+- 自动 marker / loop 分析只作为候选结果，最终仍建议人工试听确认。
+- 推荐使用短路径，避免外部工具遇到路径或权限问题，例如：
+
+  ```text
+  E:\FH6RadioTool
+  E:\FH6Music
+  E:\FmodBankTools
+  ```
