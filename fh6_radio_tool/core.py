@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .ffmpeg_tools import prepare_one_audio
+from .marker_normalization import normalize_track_markers_for_prepared_audio
 from .segment_tools import SEGMENTS_FILE_NAME, load_segments, markers_for_prepare_record, markers_to_json
 from .metadata_tools import METADATA_FILE_NAME, metadata_for_output_filenames
 from .txt_tools import write_bank_wav_list
@@ -42,6 +43,22 @@ class InvalidAudioError(RuntimeError):
         self.invalid_files = invalid_files
         message = "存在无法规范化或不符合要求的音频文件，已中止 dry-run 生成。"
         super().__init__(message)
+
+
+def _raw_markers_for_prepare_record(segments_data: dict, record) -> dict | None:
+    if record.output_info is None:
+        return None
+    items = segments_data.get("items", {}) if isinstance(segments_data, dict) else {}
+    names = [record.output_info.filename]
+    if record.source_path is not None:
+        names.append(record.source_path.name)
+    if record.output_path is not None:
+        names.append(record.output_path.name)
+    for name in names:
+        item = items.get(name)
+        if isinstance(item, dict) and isinstance(item.get("markers"), dict):
+            return dict(item["markers"])
+    return None
 
 
 def _path_json_default(obj):
@@ -97,7 +114,18 @@ def prepare_dry_run(options: PrepareOptions) -> dict:
     for record in prepare_records:
         if record.output_info is None:
             continue
-        markers = markers_for_prepare_record(segments_data, record)
+        raw_markers = _raw_markers_for_prepare_record(segments_data, record)
+        markers = (
+            normalize_track_markers_for_prepared_audio(
+                raw_markers,
+                record.source_info,
+                record.output_info,
+                marker_unit="samples",
+                label=record.output_info.filename,
+            ).markers
+            if raw_markers is not None
+            else markers_for_prepare_record(segments_data, record)
+        )
         if markers is None:
             continue
         markers_by_filename[record.output_info.filename] = markers

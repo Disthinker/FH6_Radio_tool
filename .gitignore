@@ -1,0 +1,62 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build outputs
+build/
+dist/
+build_pyinstaller/
+dist_pyinstaller/
+build_nuitka/
+dist_nuitka/
+dist_release/
+*.build/
+*.dist/
+*.onefile-build/
+*.spec
+
+# Runtime/generated project data
+work/
+output/
+backup/
+analysis/
+dev_scan/
+exports/
+logs/
+*.log
+
+# Release archives and generated packages
+*_portable.zip
+*_standalone.zip
+*_release.zip
+*_source.zip
+*.7z
+*.rar
+
+# Game/audio assets and external tools
+*.bank
+*.fsb
+*.wav
+*.wave
+*.flac
+*.mp3
+*.m4a
+*.aac
+*.ogg
+*.wma
+*.exe
+
+# Historical one-off patch exports
+HOTFIX_DIFF_*.patch
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

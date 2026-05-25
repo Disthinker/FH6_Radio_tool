@@ -239,8 +239,8 @@ def _read_txt_lines(path: Path) -> list[str]:
     except Exception:
         return []
     lines = []
-    for line in raw.splitlines():
-        line = line.strip()
+    for line in str(raw or "").splitlines():
+        line = str(line or "").strip()
         if not line or line.startswith("#") or line.startswith("//"):
             continue
         lines.append(line)
@@ -254,7 +254,7 @@ def _looks_like_fmod_txt(path: Path, lines: list[str]) -> bool:
     if "readme" in name or "manual" in name:
         return False
     # Fmod Bank Tools 的 txt 行通常是 wav 文件名。
-    wav_like = sum(1 for line in lines if line.lower().endswith(".wav"))
+    wav_like = sum(1 for line in lines if str(line or "").lower().endswith(".wav"))
     return wav_like > 0 or len(lines) >= 2
 
 
@@ -319,7 +319,12 @@ def parse_extract_template(template_dir: Path) -> list[ExtractRecord]:
     for txt, lines in txts:
         txt_relpath = txt.relative_to(template_dir).as_posix()
         for subsound_index, line in enumerate(lines):
+            line = str(line or "").strip()
+            if not line:
+                continue
             extracted_name = Path(line).name
+            if not extracted_name:
+                continue
             extracted_stem = Path(extracted_name).stem
             original_relpath = _find_original_wav_relpath(template_dir, txt, extracted_name)
             wav_path = template_dir / original_relpath
@@ -1303,6 +1308,8 @@ def create_fmod_rebuild_workspace(
                 "peak_limited": "",
                 "status": "copied_no_reference",
             })
+            if progress_callback:
+                progress_callback(pct, f"[AUDIO] {row.audio_filename}: copied without reference loudness match")
             replaced_count += 1
             continue
 
@@ -1320,6 +1327,14 @@ def create_fmod_rebuild_workspace(
             "peak_limited": str(result.peak_limited),
             "status": result.status,
         })
+        if progress_callback:
+            src_db = "" if result.source_dbfs is None else f"{result.source_dbfs:.2f} dBFS"
+            ref_db = "" if result.reference_dbfs is None else f"{result.reference_dbfs:.2f} dBFS"
+            progress_callback(
+                pct,
+                f"[AUDIO] {row.audio_filename}: reference_loudness={ref_db}, source_loudness={src_db}, "
+                f"applied_gain={result.applied_gain_db:.2f} dB, peak_limited={result.peak_limited}",
+            )
         replaced_count += 1
 
     if replaced_count != len(active_rows):

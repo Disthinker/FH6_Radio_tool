@@ -13,7 +13,7 @@ from .metadata_tools import load_track_metadata
 from .models import AudioInfo, SegmentMarkers, TrackPatch
 from .order_tools import FMOD_EXTRACT_TEMPLATE_DIR_NAME, FMOD_REBUILD_WORKSPACE_DIR_NAME, FMOD_READY_WAV_DIR_NAME, TRACK_ORDER_FILE_NAME, create_fmod_rebuild_workspace, ensure_track_order_file, read_track_order, validate_track_order
 from .segment_tools import load_segments, markers_from_json
-from .xml_tools import patch_station_samples, write_xml
+from .xml_tools import patch_station_samples, validate_station_patch_consistency, write_xml
 from .xml_tools import find_station, parse_xml, station_info_from_node
 from .wav_tools import read_wav_info
 
@@ -232,6 +232,7 @@ def _patch_xml_by_track_order(
     rows,
     audio_by_filename: dict[str, AudioInfo],
     markers_by_filename: dict[str, SegmentMarkers],
+    xml_sync_report: list[str] | None = None,
 ) -> None:
     tree = parse_xml(xml_path)
 
@@ -260,7 +261,12 @@ def _patch_xml_by_track_order(
             )
         )
 
-    patched = patch_station_samples(tree, station_name, patches)
+    sync_report: list[str] = []
+    patched = patch_station_samples(tree, station_name, patches, sync_report=sync_report)
+    validation_warnings = validate_station_patch_consistency(patched, station_name, patches)
+    if xml_sync_report is not None:
+        xml_sync_report.extend(sync_report)
+        xml_sync_report.extend(f"WARN: {line}" for line in validation_warnings)
     write_xml(patched, output_xml)
 
 

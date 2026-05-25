@@ -724,6 +724,10 @@ def _class_name(hwnd: int) -> str:
         return ""
 
 
+def _safe_text(value: object) -> str:
+    return str(value or "")
+
+
 
 def _click_client_point(hwnd: int, x: int, y: int) -> tuple[bool, str]:
     """Physically click a client-area point in a top-level window.
@@ -766,7 +770,7 @@ def _trigger_gui_action_win32(pid: int, action: str, timeout_sec: int = 12) -> t
     """
     if os.name != "nt":
         return False, "Win32 fallback is only available on Windows."
-    action_lower = action.lower().strip()
+    action_lower = _safe_text(action).lower().strip()
     if action_lower not in {"extract", "rebuild"}:
         return False, f"未知 action: {action}"
     try:
@@ -804,8 +808,8 @@ def _trigger_gui_action_win32(pid: int, action: str, timeout_sec: int = 12) -> t
             if clicked:
                 return False
             try:
-                text = _window_text(int(child_hwnd)).strip().lower()
-                cls = _class_name(int(child_hwnd)).strip().lower()
+                text = _safe_text(_window_text(int(child_hwnd))).strip().lower()
+                cls = _safe_text(_class_name(int(child_hwnd))).strip().lower()
                 if action_lower in text and ("button" in cls or "menu" in cls or text == action_lower):
                     user32.SendMessageW(child_hwnd, BM_CLICK, 0, 0)
                     clicked.append(text or cls or str(int(child_hwnd)))
@@ -848,7 +852,7 @@ def _trigger_gui_action_win32(pid: int, action: str, timeout_sec: int = 12) -> t
 
 def try_trigger_gui_action(pid: int, action: str, timeout_sec: int = 12) -> tuple[bool, str]:
     """Best-effort GUI automation with pywinauto plus a Win32 fallback."""
-    action_lower = action.lower().strip()
+    action_lower = _safe_text(action).lower().strip()
     if action_lower not in {"extract", "rebuild"}:
         return False, f"未知 action: {action}"
 
@@ -864,8 +868,8 @@ def try_trigger_gui_action(pid: int, action: str, timeout_sec: int = 12) -> tupl
                 # Try menu/button text first; UI labels differ by release, so keep this fuzzy.
                 for ctrl in win.descendants():
                     try:
-                        text = (ctrl.window_text() or "").strip().lower()
-                        cls = (ctrl.friendly_class_name() or "").lower()
+                        text = _safe_text(ctrl.window_text()).strip().lower()
+                        cls = _safe_text(ctrl.friendly_class_name()).lower()
                         if action_lower in text and any(k in cls for k in ("button", "menu", "tool")):
                             ctrl.click_input()
                             return True, f"已通过 pywinauto(win32) 点击 {action} 控件：{text or cls}。"
@@ -1318,7 +1322,7 @@ def wait_for_rebuild_outputs(
     proc: subprocess.Popen | None = None,
     baseline_snapshot: dict[str, tuple[int, int]] | None = None,
 ) -> tuple[bool, str]:
-    names = {Path(x).name for x in (expected_bank_names or []) if str(x).strip()}
+    names = {Path(_safe_text(x)).name for x in (expected_bank_names or []) if _safe_text(x).strip()}
     if names:
         return _wait_until_stable(
             layout.rebuild_dir,
@@ -1351,7 +1355,7 @@ def launch_trigger_and_wait(exe_path: Path, action: str, *, auto_trigger: bool =
     every subsequent Extract/Rebuild starts from a fresh process state.
     """
     layout = layout_from_exe(exe_path)
-    action_lower = action.lower().strip()
+    action_lower = _safe_text(action).lower().strip()
     proc: subprocess.Popen | None = None
     try:
         if action_lower == "extract":

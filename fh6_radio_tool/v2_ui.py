@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 
 from .async_tools import BackgroundTask
 from .bank_tools import choose_banks, make_bank_plan, write_bank_plan_outputs
-from .ffmpeg_tools import find_ffmpeg, run_ffmpeg_normalize, safe_stem
+from .ffmpeg_tools import AudioNormalizationReport, describe_audio_normalization_report, find_ffmpeg, run_ffmpeg_normalize, safe_stem
 from .metadata_tools import guess_display_artist_from_filename
 from .models import AudioInfo, SegmentMarkers
 from .order_tools import (
@@ -48,8 +48,11 @@ from .fmod_automation import (
     prepare_extract_job, prepare_rebuild_job, copy_banks_to_tool_bank_dir,
 )
 from .v2_state_store import APP_VERSION, StateStore, TrackProfile
-from .marker_import_tools import MarkerImportRow, normalize_match_text, read_marker_import_file, write_marker_import_template, IMPORT_COLUMNS
+from .marker_import_tools import MarkerImportRow, normalize_match_text, read_marker_import_file, write_marker_import_template, IMPORT_COLUMNS, EXPORT_COLUMNS
+from .marker_normalization import normalize_track_markers_for_prepared_audio
 from .wav_preview_player import WavPreviewPlayer
+from .waveform_tools import DEFAULT_WAVEFORM_BINS, load_or_build_waveform
+from .waveform_widget import WaveformWidget
 from .wav_tools import list_audio_candidates, natural_key, read_wav_info, validate_wav
 from .xml_tools import find_station, get_track_samples, list_station_infos, parse_xml, station_info_from_node, write_xml
 from .runtime_tools import runtime_root, bundled_resource_root, is_frozen_app
@@ -328,6 +331,45 @@ def marker_values_for_save(markers: dict[str, int]) -> dict[str, int]:
     return result
 
 
+def marker_source_info_for_profile(
+    profile: TrackProfile,
+    normalize_report: AudioNormalizationReport | None = None,
+) -> AudioInfo | None:
+    sample_rate = int(profile.sample_rate or 0)
+    sample_length = int(profile.sample_length or 0)
+    if sample_rate > 0 and sample_length > 0:
+        return AudioInfo(
+            path=Path(profile.source_path),
+            filename=profile.filename or Path(profile.source_path).name,
+            samplerate=sample_rate,
+            channels=2,
+            bits_per_sample=16,
+            frames=sample_length,
+            duration_sec=sample_length / sample_rate,
+        )
+
+    source = Path(profile.source_path)
+    if source.suffix.lower() in (".wav", ".wave"):
+        try:
+            return read_wav_info(source)
+        except Exception:
+            pass
+
+    if normalize_report is not None:
+        estimated_length = normalize_report.source_sample_length_estimate()
+        if estimated_length and normalize_report.source_sample_rate:
+            return AudioInfo(
+                path=source,
+                filename=profile.filename or source.name,
+                samplerate=int(normalize_report.source_sample_rate),
+                channels=int(normalize_report.source_channels or 2),
+                bits_per_sample=16,
+                frames=int(estimated_length),
+                duration_sec=float(normalize_report.source_duration_sec or 0.0),
+            )
+    return None
+
+
 def app_icon_path() -> Path | None:
     """Find the bundled application icon for the window/taskbar."""
     candidates = [
@@ -503,12 +545,14 @@ class MainWindow(QMainWindow):
         self.preview_scenario_combo.addItem("冲线后：PostRaceLoop 循环", "post_loop")
         self.seek_slider = QSlider(Qt.Horizontal)
         self.seek_slider.setRange(0, 0)
+        self.waveform = WaveformWidget(self)
         self.position_label = QLabel("0 / 0")
         self.marker_target_combo = QComboBox()
         self.preview_seconds_spin = QSpinBox()
         self.preview_seconds_spin.setRange(1, 30)
         self.preview_seconds_spin.setValue(5)
         self._updating_slider = False
+        self._slider_dragging = False
 
         self.marker_spins: dict[str, QSpinBox] = {}
         self.log_box = QPlainTextEdit()
@@ -612,9 +656,12 @@ class MainWindow(QMainWindow):
         self.loop_audio_combo.currentIndexChanged.connect(self.on_loop_audio_changed)
         self.candidate_combo.currentIndexChanged.connect(self.on_candidate_combo_changed)
         self.candidate_table.itemSelectionChanged.connect(self.on_candidate_table_selection_changed)
-        self.seek_slider.sliderReleased.connect(self.seek_to_slider)
+        self.seek_slider.sliderPressed.connect(self.begin_seek_drag)
         self.seek_slider.sliderMoved.connect(self.on_seek_slider_moved)
+        self.seek_slider.sliderReleased.connect(self.finish_seek_drag)
+        self.waveform.seekRequested.connect(self.seek_to_sample)
         self.player.positionChanged.connect(self.on_player_position_changed)
+        self.marker_target_combo.currentIndexChanged.connect(self.refresh_waveform_markers)
         self.ui_language_combo.currentIndexChanged.connect(self.on_ui_language_changed)
         self.game_language_combo.currentIndexChanged.connect(self.on_game_language_changed)
         self.apply_ui_language()
@@ -1073,17 +1120,24 @@ class MainWindow(QMainWindow):
         seek_box = QGroupBox("进度条试听与手动微调")
         seek_layout = QVBoxLayout(seek_box)
         seek_layout.setSpacing(8)
+        self.waveform.setToolTip("Waveform preview: click or drag to seek. Markers use sample positions.")
+        seek_layout.addWidget(self.waveform)
         seek_layout.addWidget(self.seek_slider)
         playback_row = QHBoxLayout()
         playback_row.addWidget(self.position_label)
         playback_row.addStretch(1)
         self.btn_play_pause = QPushButton("播放 / 继续")
         self.btn_play_pause.setMinimumWidth(125)
-        self.btn_play_pause.clicked.connect(lambda: self.player.play())
+        self.btn_play_pause.clicked.connect(self.play_or_resume_audio)
         self.btn_stop = QPushButton("停止")
-        self.btn_stop.setMinimumWidth(80)
-        self.btn_stop.clicked.connect(lambda: self.player.stop())
+        self.btn_stop.setText("Reset")
+        self.btn_stop.setMinimumWidth(95)
+        self.btn_stop.clicked.connect(self.reset_player_to_start)
+        self.btn_pause = QPushButton("Pause")
+        self.btn_pause.setMinimumWidth(80)
+        self.btn_pause.clicked.connect(self.player.pause)
         playback_row.addWidget(self.btn_play_pause)
+        playback_row.addWidget(self.btn_pause)
         playback_row.addWidget(self.btn_stop)
         seek_layout.addLayout(playback_row)
 
@@ -1130,6 +1184,7 @@ class MainWindow(QMainWindow):
                 spin.setValue(-1)
                 spin.setMinimumWidth(135)
                 spin.setMaximumWidth(170)
+                spin.valueChanged.connect(lambda _value, _name=name: self.refresh_waveform_markers())
                 self.marker_spins[name] = spin
                 row_layout.addWidget(label)
                 row_layout.addWidget(spin)
@@ -1433,6 +1488,9 @@ class MainWindow(QMainWindow):
             'btn_dev_full_audio_scan': ("Extract all banks and generate statistics/mapping tables", "一键 Extract 全部 Bank 并生成统计/映射表"),
             'btn_dev_menu_scan': ("Scan main-menu/frontend music banks", "扫描主菜单/前端音乐 Bank"),
         }
+        buttons["btn_pause"] = ("Pause", "暂停")
+        buttons["btn_stop"] = ("Reset", "回到起点")
+        buttons["btn_export_marker_template"] = ("Export markers", "导出 Marker")
         for attr, (en_text, zh_text) in buttons.items():
             obj = getattr(self, attr, None)
             if obj is not None:
@@ -2777,6 +2835,7 @@ class MainWindow(QMainWindow):
         self.candidate_summary_label.setText("尚未分析候选。")
         self.seek_slider.setRange(0, 0)
         self.position_label.setText("0 / 0")
+        self.waveform.clear_waveform(self.ui_text("加载 WAV 后显示波形。", "Load a WAV file to show waveform."))
         try:
             if path.suffix.lower() in (".wav", ".wave"):
                 info = read_wav_info(path)
@@ -2784,6 +2843,7 @@ class MainWindow(QMainWindow):
                 max_sample = min(2_147_483_647, max(0, info.sample_length - 1))
                 self.seek_slider.setRange(0, max_sample)
                 self.position_label.setText(f"0 / {format_sample_time(max_sample, info.samplerate)}")
+                self.load_waveform_for_current_audio(path, info)
                 profile = self.store.load_track_profile(track_key_for_path(path))
                 defaults = safe_default_marker_values(max_sample)
                 markers = dict(defaults)
@@ -2801,6 +2861,9 @@ class MainWindow(QMainWindow):
                 for name, spin in self.marker_spins.items():
                     spin.setMaximum(max_sample)
                     spin.setValue(int(markers.get(name, -1)))
+                self.refresh_waveform_markers()
+            else:
+                self.waveform.clear_waveform(self.ui_text("非 WAV 文件暂不显示波形；生成/转换后仍可使用预览。", "Waveform preview is available for WAV files."))
         except Exception as exc:
             self.log(f"[WARN] 无法载入试听音频: {exc}")
 
@@ -2978,8 +3041,66 @@ class MainWindow(QMainWindow):
             self.candidate_combo.setCurrentIndex(row)
             self.candidate_combo.blockSignals(False)
 
+    def marker_values_for_ui(self) -> dict[str, int]:
+        return {name: int(spin.value()) for name, spin in self.marker_spins.items()}
+
     def current_marker_values(self) -> dict[str, int]:
         return {name: int(spin.value()) for name, spin in self.marker_spins.items() if spin.value() >= 0}
+
+    def refresh_waveform_markers(self) -> None:
+        if not hasattr(self, "waveform"):
+            return
+        self.waveform.set_markers(self.marker_values_for_ui(), self.selected_marker_name())
+
+    def load_waveform_for_current_audio(self, path: Path, info: AudioInfo) -> None:
+        try:
+            data = load_or_build_waveform(
+                path,
+                project_work_dir() / "waveform_cache",
+                bins=DEFAULT_WAVEFORM_BINS,
+            )
+            peaks = [float(x) for x in data.get("peaks", [])]
+            total = int(data.get("total_frames") or info.sample_length)
+            samplerate = int(data.get("samplerate") or info.samplerate)
+            self.waveform.set_waveform(peaks, total, samplerate)
+            self.waveform.set_position(self.player.current_sample())
+            self.refresh_waveform_markers()
+        except Exception as exc:
+            self.waveform.clear_waveform(self.ui_text("无法生成波形，仍可使用普通进度条。", "Waveform unavailable; slider preview still works."))
+            self.log(f"[WAVEFORM][WARN] {path.name}: {exc}")
+
+    def update_position_ui(self, sample: int) -> None:
+        sr = max(1, int(self.player.samplerate or 48000))
+        max_sample = max(0, int(self.player.total_frames) - 1)
+        sample = max(0, min(int(sample), max_sample))
+        self._updating_slider = True
+        try:
+            if self.seek_slider.maximum() != max_sample:
+                self.seek_slider.setRange(0, min(2_147_483_647, max_sample))
+            self.seek_slider.setValue(max(0, min(sample, self.seek_slider.maximum())))
+            self.position_label.setText(f"{format_sample_time(sample, sr)} / {format_sample_time(max_sample, sr)}")
+            self.waveform.set_position(sample)
+        finally:
+            self._updating_slider = False
+
+    def play_or_resume_audio(self) -> None:
+        self.player.play()
+
+    def reset_player_to_start(self) -> None:
+        self.player.stop()
+        self.update_position_ui(0)
+
+    def begin_seek_drag(self) -> None:
+        self._slider_dragging = True
+
+    def finish_seek_drag(self) -> None:
+        self._slider_dragging = False
+        self.seek_to_sample(int(self.seek_slider.value()))
+
+    def seek_to_sample(self, sample: int) -> None:
+        sample = max(0, min(int(sample), max(0, int(self.player.total_frames) - 1)))
+        self.player.seek_sample(sample)
+        self.update_position_ui(sample)
 
     def _validate_preview_range(self, start: int, end: int, *, loop: bool, loop_start: int | None, label: str) -> bool:
         sr = max(1, int(self.player.samplerate or 48000))
@@ -3035,26 +3156,18 @@ class MainWindow(QMainWindow):
             self.show_error("场景试听失败", exc)
 
     def on_player_position_changed(self, sample: int):
-        if self._updating_slider:
+        if self._updating_slider or self._slider_dragging:
             return
-        sr = max(1, int(self.player.samplerate or 48000))
-        max_sample = max(0, int(self.player.total_frames) - 1)
-        self._updating_slider = True
-        try:
-            if self.seek_slider.maximum() != max_sample:
-                self.seek_slider.setRange(0, min(2_147_483_647, max_sample))
-            self.seek_slider.setValue(max(0, min(int(sample), self.seek_slider.maximum())))
-            self.position_label.setText(f"{format_sample_time(sample, sr)} / {format_sample_time(max_sample, sr)}")
-        finally:
-            self._updating_slider = False
+        self.update_position_ui(int(sample))
 
     def on_seek_slider_moved(self, value: int):
         sr = max(1, int(self.player.samplerate or 48000))
         max_sample = max(0, int(self.player.total_frames) - 1)
         self.position_label.setText(f"{format_sample_time(value, sr)} / {format_sample_time(max_sample, sr)}")
+        self.waveform.set_position(int(value))
 
     def seek_to_slider(self):
-        self.player.seek_sample(int(self.seek_slider.value()))
+        self.seek_to_sample(int(self.seek_slider.value()))
 
     def selected_marker_name(self) -> str:
         text = self.marker_target_combo.currentText().strip()
@@ -3251,9 +3364,43 @@ class MainWindow(QMainWindow):
         """Match an import row to a scanned audio file.
 
         Matching priority:
-        1) Filename / MatchName / DisplayName against current music file stem.
-        2) SampleLength when it uniquely identifies one scanned WAV file.
+        1) Stable exported context: station + slot, sound name, source path.
+        2) Filename / MatchName / DisplayName against current music file stem.
+        3) SampleLength when it uniquely identifies one scanned WAV file.
         """
+        station_key = normalize_match_text(row.station)
+        if row.slot_index is not None:
+            for assignment in self.store.list_assignments(row.station or None):
+                if int(assignment.get("slot_index") or -999) != int(row.slot_index):
+                    continue
+                if station_key and normalize_match_text(assignment.get("station_name")) != station_key:
+                    continue
+                profile = self.store.load_track_profile(str(assignment.get("track_key") or ""))
+                if profile and profile.source_path:
+                    return Path(profile.source_path)
+
+        sound_keys = {
+            normalize_match_text(row.sound_name),
+            normalize_match_text(row.original_sound_name),
+        }
+        sound_keys.discard("")
+        if sound_keys:
+            matches: list[Path] = []
+            for assignment in self.store.list_assignments(row.station or None):
+                if normalize_match_text(assignment.get("original_sound_name")) not in sound_keys:
+                    continue
+                profile = self.store.load_track_profile(str(assignment.get("track_key") or ""))
+                if profile and profile.source_path:
+                    matches.append(Path(profile.source_path))
+            unique = {str(p): p for p in matches}
+            if len(unique) == 1:
+                return next(iter(unique.values()))
+
+        if row.source_audio_path:
+            p = Path(row.source_audio_path)
+            if p.exists():
+                return p
+
         if not self.audio_paths:
             return None
         name_keys = [row.filename, row.match_name, row.display_name]
@@ -3283,7 +3430,7 @@ class MainWindow(QMainWindow):
         return index
 
     def import_marker_profiles_from_file(self) -> None:
-        if not self.audio_paths:
+        if not self.audio_paths and not self.store.list_assignments():
             self.warn_box("缺少音乐", "请先选择并扫描音乐目录，然后再导入 Marker 参数。", "Missing music", "Please choose and scan the music folder before importing markers.")
             return
         file_path, _ = QFileDialog.getOpenFileName(
@@ -3306,21 +3453,36 @@ class MainWindow(QMainWindow):
                     continue
                 key = track_key_for_path(path)
                 old = self.store.load_track_profile(key)
+                if old is None:
+                    for candidate in self.store.list_track_profiles():
+                        try:
+                            if Path(candidate.source_path) == path or candidate.filename == path.name:
+                                old = candidate
+                                key = candidate.track_key
+                                break
+                        except Exception:
+                            continue
                 try:
                     info = read_wav_info(path) if path.suffix.lower() in (".wav", ".wave") else None
                 except Exception:
                     info = None
                 display, artist = guess_display_artist_from_filename(path.name)
                 profile = old or TrackProfile(key, str(path), path.name, display, artist)
+                merged_markers = dict(profile.markers or {})
+                for marker_name, marker_value in row.markers.items():
+                    if marker_value is None:
+                        merged_markers[marker_name] = -1
+                    else:
+                        merged_markers[marker_name] = int(marker_value)
                 profile = replace(
                     profile,
                     source_path=str(path),
                     filename=path.name,
-                    display_name=row.display_name or profile.display_name or display,
-                    artist=row.artist or profile.artist or artist,
+                    display_name=profile.display_name or row.display_name or display,
+                    artist=profile.artist or row.artist or artist,
                     sample_rate=info.samplerate if info else (row.sample_rate or profile.sample_rate),
                     sample_length=info.sample_length if info else (row.sample_length or profile.sample_length),
-                    markers={name: int(row.markers.get(name, -1)) for name in MARKER_ORDER},
+                    markers=marker_values_for_save(merged_markers),
                     notes=(profile.notes + "\n" if profile.notes else "") + f"Imported markers from {Path(file_path).name}, row {row.source_row}",
                 )
                 self.store.save_track_profile(profile)
@@ -3340,6 +3502,93 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.show_error("导入 Marker 参数失败", exc)
 
+    def _station_export_context(self) -> tuple[dict[str, str], dict[tuple[str, int], dict[str, object]]]:
+        station_banks: dict[str, str] = {}
+        sample_rows: dict[tuple[str, int], dict[str, object]] = {}
+        if not self.current_xml:
+            return station_banks, sample_rows
+        try:
+            for station_info in self.station_infos:
+                station = str(getattr(station_info, "name", "") or "")
+                if not station:
+                    continue
+                station_banks[station] = "|".join(str(x) for x in getattr(station_info, "banks", []) or [])
+                for row in station_sample_rows(self.current_xml, station):
+                    try:
+                        sample_rows[(station, int(row.get("slot_index", -1)))] = row
+                    except Exception:
+                        continue
+        except Exception as exc:
+            self.log(f"[EXPORT][WARN] Failed to read station context: {exc}")
+        return station_banks, sample_rows
+
+    def _markers_for_export_profile(self, profile: TrackProfile, path: Path | None) -> dict[str, int]:
+        markers = dict(profile.markers or {})
+        if path and self.current_loop_audio and Path(self.current_loop_audio) == Path(path):
+            markers.update(self.marker_values_for_ui())
+        return marker_values_for_save(markers)
+
+    def _marker_export_row(
+        self,
+        profile: TrackProfile,
+        *,
+        assignment: dict[str, object] | None = None,
+        station_banks: dict[str, str] | None = None,
+        sample_rows: dict[tuple[str, int], dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        station_banks = station_banks or {}
+        sample_rows = sample_rows or {}
+        assignment = assignment or {}
+        station = str(assignment.get("station_name") or "")
+        slot_raw = assignment.get("slot_index")
+        slot_index: int | str = int(slot_raw) if slot_raw not in (None, "") else ""
+        source_path = Path(profile.source_path) if profile.source_path else Path(profile.filename)
+        xml_row = sample_rows.get((station, int(slot_index))) if slot_index != "" else None
+        sound_name = str((xml_row or {}).get("sound_name") or assignment.get("original_sound_name") or "")
+        title = profile.display_name or str(assignment.get("original_display_name") or "") or Path(profile.filename).stem
+        artist = profile.artist or str(assignment.get("original_artist") or "")
+        sample_rate = int(profile.sample_rate or 0)
+        sample_length = int(profile.sample_length or 0)
+        try:
+            if source_path.suffix.lower() in (".wav", ".wave") and source_path.exists():
+                info = read_wav_info(source_path)
+                sample_rate = int(info.samplerate)
+                sample_length = int(info.sample_length)
+        except Exception:
+            pass
+        duration = (float(sample_length) / float(sample_rate)) if sample_rate > 0 and sample_length > 0 else 0.0
+        markers = self._markers_for_export_profile(profile, source_path)
+        row: dict[str, object] = {col: "" for col in EXPORT_COLUMNS}
+        row.update({
+            "station": station,
+            "radio": station,
+            "station_name": station,
+            "slot_index": slot_index,
+            "sound_name": sound_name,
+            "original_sound_name": sound_name,
+            "bank_name": station_banks.get(station, ""),
+            "target_bank": station_banks.get(station, ""),
+            "title": title,
+            "display_name": title,
+            "artist": artist,
+            "filename": profile.filename or source_path.name,
+            "source_audio_path": str(source_path),
+            "sample_rate": sample_rate,
+            "sample_length": sample_length,
+            "duration_sec": f"{duration:.3f}" if duration else "",
+            "marker_unit": "samples",
+            "MatchName": Path(profile.filename or source_path.name).stem,
+            "Filename": profile.filename or source_path.name,
+            "DisplayName": title,
+            "Artist": artist,
+            "SampleRate": sample_rate,
+            "SampleLength": sample_length,
+        })
+        for marker_name in MARKER_ORDER:
+            if marker_name in markers:
+                row[marker_name] = int(markers[marker_name])
+        return row
+
     def export_marker_import_template_dialog(self) -> None:
         default = project_output_dir() / "marker_export.csv"
         file_path, _ = QFileDialog.getSaveFileName(
@@ -3351,23 +3600,30 @@ class MainWindow(QMainWindow):
         if not file_path:
             return
         try:
-            rows = []
-            for path in self.audio_paths:
-                row = {col: "" for col in IMPORT_COLUMNS}
-                row["MatchName"] = path.stem
-                row["Filename"] = path.name
-                row["DisplayName"] = path.stem
-                try:
-                    if path.suffix.lower() in (".wav", ".wave"):
-                        info = read_wav_info(path)
-                        row["SampleRate"] = info.samplerate
-                        row["SampleLength"] = info.sample_length
-                        row["TrackStart"] = 0
-                        row["End"] = max(0, info.sample_length - 1)
-                except Exception:
-                    pass
-                rows.append(row)
-            write_marker_import_template(Path(file_path), rows)
+            rows: list[dict[str, object]] = []
+            station_banks, sample_rows = self._station_export_context()
+            assignments = self.store.list_assignments()
+            profile_by_key = {p.track_key: p for p in self.store.list_track_profiles()}
+            for assignment in assignments:
+                profile = profile_by_key.get(str(assignment.get("track_key") or ""))
+                if profile:
+                    rows.append(self._marker_export_row(profile, assignment=assignment, station_banks=station_banks, sample_rows=sample_rows))
+            if not rows:
+                for path in self.audio_paths:
+                    key = track_key_for_path(path)
+                    profile = self.store.load_track_profile(key)
+                    if not profile:
+                        display, artist = guess_display_artist_from_filename(path.name)
+                        profile = TrackProfile(key, str(path), path.name, display, artist)
+                    rows.append(self._marker_export_row(profile, station_banks=station_banks, sample_rows=sample_rows))
+            write_marker_import_template(Path(file_path), rows, fieldnames=EXPORT_COLUMNS)
+            self.info_box(
+                "已导出 Marker",
+                f"已导出 {len(rows)} 行 Marker 配置：\n{file_path}\n\nMarker 单位：samples。空单元格在导入时会保留原值；填写 CLEAR 可清除字段。",
+                "Markers exported",
+                f"Exported {len(rows)} marker row(s):\n{file_path}\n\nMarker unit: samples. Blank cells preserve existing values on import; use CLEAR to clear a field.",
+            )
+            return
             self.info_box("已导出 Marker", f"已导出 Marker：\n{file_path}", "Markers exported", f"Markers exported:\n{file_path}")
         except Exception as exc:
             self.show_error("导出 Marker 失败", exc)
@@ -5052,18 +5308,14 @@ class MainWindow(QMainWindow):
 
         self.run_background_task("导入 Fmod Extract 模板", job, done, estimated="取决于 wav 数量和磁盘速度，通常数秒到数十秒。")
 
-    def _prepare_audio_for_generation(self, source: Path, slot_index: int, dst_dir: Path) -> AudioInfo:
+    def _prepare_audio_for_generation(self, source: Path, slot_index: int, dst_dir: Path) -> tuple[AudioInfo, AudioNormalizationReport]:
         dst_dir.mkdir(parents=True, exist_ok=True)
         stem = safe_stem(f"slot_{slot_index:02d}_{source.stem}", 90)
         dst = dst_dir / f"{stem}.wav"
-        validation = validate_wav(source)
-        if validation.ok and validation.info is not None:
-            shutil.copy2(source, dst)
-        else:
-            ffmpeg = find_ffmpeg(None)
-            run_ffmpeg_normalize(source, dst, ffmpeg)
+        ffmpeg = find_ffmpeg(None)
+        normalize_report = run_ffmpeg_normalize(source, dst, ffmpeg)
         info = read_wav_info(dst)
-        return AudioInfo(
+        audio = AudioInfo(
             path=dst,
             filename=dst.name,
             samplerate=info.samplerate,
@@ -5072,6 +5324,7 @@ class MainWindow(QMainWindow):
             frames=info.frames,
             duration_sec=info.duration_sec,
         )
+        return audio, normalize_report
 
     def _filter_xml_only_unmatched_rows(self, rows, assigned_slots, extract_template: Path, report=None, station: str | None = None):
         """Skip XML rows that have no matching FMOD audio in the extracted bank.
@@ -5154,6 +5407,8 @@ class MainWindow(QMainWindow):
         audio_by_filename: dict[str, AudioInfo] = {}
         markers_by_filename: dict[str, SegmentMarkers] = {}
         marker_json_by_filename: dict[str, dict[str, int]] = {}
+        raw_marker_json_by_filename: dict[str, dict[str, int]] = {}
+        marker_source_info_by_filename: dict[str, AudioInfo | None] = {}
         slot_to_profile_and_audio: dict[int, tuple[TrackProfile, AudioInfo]] = {}
 
         total = max(1, len(assignments))
@@ -5162,8 +5417,10 @@ class MainWindow(QMainWindow):
             if not profile:
                 raise ValueError(f"slot {slot} 的 profile 丢失: {key}")
             report(15 + int(25 * idx / total), f"[V2] 准备音频 {idx}/{total}: slot {slot} <- {Path(profile.source_path).name}")
-            info = self._prepare_audio_for_generation(Path(profile.source_path), slot, prepared_dir)
+            info, normalize_report = self._prepare_audio_for_generation(Path(profile.source_path), slot, prepared_dir)
             audio_by_filename[info.filename] = info
+            for line in describe_audio_normalization_report(normalize_report):
+                report(15 + int(25 * idx / total), f"[AUDIO] slot {slot}: {line}")
             marker_data = dict(profile.markers or {})
             marker_data.setdefault("TrackStart", 0)
             marker_data.setdefault("TrackDrop", 0)
@@ -5175,9 +5432,22 @@ class MainWindow(QMainWindow):
             marker_data.setdefault("DJSegment", -1)
             marker_data.setdefault("StingerStart", -1)
             marker_data.setdefault("DJStart", -1)
-            marker_data["End"] = max(0, info.sample_length - 1)
-            marker_json_by_filename[info.filename] = marker_data
-            markers_by_filename[info.filename] = markers_from_json(marker_data, info)
+            source_marker_info = marker_source_info_for_profile(profile, normalize_report)
+            marker_source_info_by_filename[info.filename] = source_marker_info
+            raw_marker_json_by_filename[info.filename] = dict(marker_data)
+            normalized_markers = normalize_track_markers_for_prepared_audio(
+                marker_data,
+                source_marker_info,
+                info,
+                source_sample_length=profile.sample_length or None,
+                source_sample_rate=profile.sample_rate or None,
+                marker_unit="samples",
+                label=f"slot {slot}/{info.filename}",
+            )
+            marker_json_by_filename[info.filename] = markers_to_json(normalized_markers.markers)
+            markers_by_filename[info.filename] = normalized_markers.markers
+            for line in normalized_markers.log_lines:
+                report(15 + int(25 * idx / total), line)
             slot_to_profile_and_audio[slot] = (profile, info)
 
         report(45, "[V2] 构造精确 slot 映射。")
@@ -5316,7 +5586,8 @@ class MainWindow(QMainWindow):
             if not row.audio_filename or row.slot_index not in effective_assigned_slots:
                 continue
             ready_path = fmod_ready / row.original_wav_relpath if row.original_wav_relpath else None
-            source_info = audio_by_filename.get(row.audio_filename)
+            prepared_info = audio_by_filename.get(row.audio_filename)
+            marker_source_info = marker_source_info_by_filename.get(row.audio_filename)
             if ready_path and ready_path.exists():
                 ready_info = read_wav_info(ready_path)
                 final_info = AudioInfo(
@@ -5329,18 +5600,31 @@ class MainWindow(QMainWindow):
                     duration_sec=ready_info.duration_sec,
                 )
                 final_audio_by_filename[row.audio_filename] = final_info
-                marker_data = dict(marker_json_by_filename.get(row.audio_filename, {}))
-                marker_data["End"] = max(0, final_info.sample_length - 1)
-                final_markers_by_filename[row.audio_filename] = markers_from_json(marker_data, final_info)
+                marker_data = dict(raw_marker_json_by_filename.get(row.audio_filename, marker_json_by_filename.get(row.audio_filename, {})))
+                final_marker_result = normalize_track_markers_for_prepared_audio(
+                    marker_data,
+                    marker_source_info,
+                    final_info,
+                    source_sample_length=(marker_source_info.sample_length if marker_source_info else None),
+                    source_sample_rate=(marker_source_info.samplerate if marker_source_info else None),
+                    marker_unit="samples",
+                    label=f"slot {row.slot_index}/{row.audio_filename}",
+                )
+                final_markers_by_filename[row.audio_filename] = final_marker_result.markers
+                for line in final_marker_result.log_lines:
+                    report(86, line)
                 sample_report_rows.append({
                     "slot_index": row.slot_index,
                     "audio_filename": row.audio_filename,
                     "target_wav": row.original_wav_relpath,
-                    "source_sample_length": "" if source_info is None else source_info.sample_length,
-                    "prepared_wav_sample_length": final_info.sample_length,
+                    "source_sample_length": "" if marker_source_info is None else marker_source_info.sample_length,
+                    "prepared_wav_sample_length": "" if prepared_info is None else prepared_info.sample_length,
+                    "final_wav_sample_length": final_info.sample_length,
                     "xml_sample_length": final_info.sample_length,
                     "end_marker": max(0, final_info.sample_length - 1),
-                    "diff_source_vs_prepared": "" if source_info is None else final_info.sample_length - source_info.sample_length,
+                    "marker_scale": f"{final_marker_result.scale:.9f}",
+                    "diff_source_vs_prepared": "" if marker_source_info is None else final_info.sample_length - marker_source_info.sample_length,
+                    "marker_warnings": " | ".join(final_marker_result.warnings),
                     "status": "ok",
                 })
             else:
@@ -5348,24 +5632,44 @@ class MainWindow(QMainWindow):
                     "slot_index": row.slot_index,
                     "audio_filename": row.audio_filename,
                     "target_wav": row.original_wav_relpath,
-                    "source_sample_length": "" if source_info is None else source_info.sample_length,
+                    "source_sample_length": "" if marker_source_info is None else marker_source_info.sample_length,
                     "prepared_wav_sample_length": "",
+                    "final_wav_sample_length": "",
                     "xml_sample_length": "",
                     "end_marker": "",
+                    "marker_scale": "",
                     "diff_source_vs_prepared": "",
+                    "marker_warnings": "",
                     "status": "missing_final_wav",
                 })
                 raise FileNotFoundError(f"最终 Rebuild WAV 不存在：{ready_path}")
 
         final_report = work / "final_wav_samplelength_report.csv"
         with final_report.open("w", encoding="utf-8-sig", newline="") as _f:
-            _fields = ["slot_index", "audio_filename", "target_wav", "source_sample_length", "prepared_wav_sample_length", "xml_sample_length", "end_marker", "diff_source_vs_prepared", "status"]
+            _fields = [
+                "slot_index", "audio_filename", "target_wav",
+                "source_sample_length", "prepared_wav_sample_length", "final_wav_sample_length",
+                "xml_sample_length", "end_marker", "marker_scale",
+                "diff_source_vs_prepared", "marker_warnings", "status",
+            ]
             _writer = csv.DictWriter(_f, fieldnames=_fields)
             _writer.writeheader()
             _writer.writerows(sample_report_rows)
 
         output_xml = out / current_xml.name
-        _patch_xml_by_track_order(current_xml, station, output_xml, patched_rows, final_audio_by_filename, final_markers_by_filename)
+        xml_sync_report: list[str] = []
+        _patch_xml_by_track_order(
+            current_xml,
+            station,
+            output_xml,
+            patched_rows,
+            final_audio_by_filename,
+            final_markers_by_filename,
+            xml_sync_report=xml_sync_report,
+        )
+        xml_sync_report_path = work / "xml_marker_sync_validation.txt"
+        xml_sync_report_path.write_text("\n".join(xml_sync_report) + ("\n" if xml_sync_report else "OK\n"), encoding="utf-8")
+        report(87, f"[XML] Marker/SampleLength node sync entries: {len(xml_sync_report)}; report: {xml_sync_report_path}")
         self._generate_patched_radioinfo_siblings(current_xml, station, patched_rows, final_audio_by_filename, final_markers_by_filename, out, report)
 
         metadata_validation = work / "xml_metadata_validation.csv"
@@ -5810,14 +6114,11 @@ class MainWindow(QMainWindow):
                 modified_bank_names.append(bank_name)
             target = workspace / rec.original_relpath
             target.parent.mkdir(parents=True, exist_ok=True)
-            validation = validate_wav(replacement_audio)
-            if validation.ok and validation.info is not None and replacement_audio.suffix.lower() == ".wav":
-                shutil.copy2(replacement_audio, target)
-                converted = False
-            else:
-                ffmpeg = find_ffmpeg(None)
-                run_ffmpeg_normalize(replacement_audio, target, ffmpeg)
-                converted = True
+            ffmpeg = find_ffmpeg(None)
+            normalize_report = run_ffmpeg_normalize(replacement_audio, target, ffmpeg)
+            converted = True
+            for line in describe_audio_normalization_report(normalize_report):
+                report(45, f"[MENU][AUDIO] {line}")
             target_rows.append({
                 "bank_name": bank_name,
                 "txt_relpath": getattr(rec, "txt_relpath", ""),
@@ -6279,18 +6580,14 @@ class MainWindow(QMainWindow):
         current_xml = Path(self.current_xml)
         db_path = self.store.db_path
 
-        def prepare_audio(source: Path, slot_index: int, dst_dir: Path) -> AudioInfo:
+        def prepare_audio(source: Path, slot_index: int, dst_dir: Path) -> tuple[AudioInfo, AudioNormalizationReport]:
             dst_dir.mkdir(parents=True, exist_ok=True)
             stem = safe_stem(f"slot_{slot_index:02d}_{source.stem}", 90)
             dst = dst_dir / f"{stem}.wav"
-            validation = validate_wav(source)
-            if validation.ok and validation.info is not None:
-                shutil.copy2(source, dst)
-            else:
-                ffmpeg = find_ffmpeg(None)
-                run_ffmpeg_normalize(source, dst, ffmpeg)
+            ffmpeg = find_ffmpeg(None)
+            normalize_report = run_ffmpeg_normalize(source, dst, ffmpeg)
             info = read_wav_info(dst)
-            return AudioInfo(
+            audio = AudioInfo(
                 path=dst,
                 filename=dst.name,
                 samplerate=info.samplerate,
@@ -6299,6 +6596,7 @@ class MainWindow(QMainWindow):
                 frames=info.frames,
                 duration_sec=info.duration_sec,
             )
+            return audio, normalize_report
 
         def job(report):
             store = StateStore(db_path)
@@ -6315,6 +6613,8 @@ class MainWindow(QMainWindow):
             profiles_by_key = {p.track_key: p for p in store.list_track_profiles()}
             audio_by_filename: dict[str, AudioInfo] = {}
             markers_by_filename: dict[str, SegmentMarkers] = {}
+            raw_marker_json_by_filename: dict[str, dict[str, int]] = {}
+            marker_source_info_by_filename: dict[str, AudioInfo | None] = {}
             slot_to_profile_and_audio: dict[int, tuple[TrackProfile, AudioInfo]] = {}
 
             total = max(1, len(assignments))
@@ -6323,12 +6623,36 @@ class MainWindow(QMainWindow):
                 if not profile:
                     raise ValueError(f"slot {slot} 的 profile 丢失: {key}")
                 report(15 + int(25 * idx / total), f"[V2] 准备音频 {idx}/{total}: slot {slot} <- {Path(profile.source_path).name}")
-                info = prepare_audio(Path(profile.source_path), slot, prepared_dir)
+                info, normalize_report = prepare_audio(Path(profile.source_path), slot, prepared_dir)
                 audio_by_filename[info.filename] = info
+                for line in describe_audio_normalization_report(normalize_report):
+                    report(15 + int(25 * idx / total), f"[AUDIO] slot {slot}: {line}")
                 marker_data = dict(profile.markers or {})
                 marker_data.setdefault("TrackStart", 0)
-                marker_data.setdefault("End", max(0, info.sample_length - 1))
-                markers_by_filename[info.filename] = markers_from_json(marker_data, info)
+                marker_data.setdefault("TrackDrop", 0)
+                marker_data.setdefault("PostDrop", 0)
+                marker_data.setdefault("TrackLoopStart", 0)
+                marker_data.setdefault("TrackLoopEnd", -1)
+                marker_data.setdefault("PostRaceLoopStart", 0)
+                marker_data.setdefault("PostRaceLoopEnd", -1)
+                marker_data.setdefault("DJSegment", -1)
+                marker_data.setdefault("StingerStart", -1)
+                marker_data.setdefault("DJStart", -1)
+                source_marker_info = marker_source_info_for_profile(profile, normalize_report)
+                marker_source_info_by_filename[info.filename] = source_marker_info
+                raw_marker_json_by_filename[info.filename] = dict(marker_data)
+                normalized_markers = normalize_track_markers_for_prepared_audio(
+                    marker_data,
+                    source_marker_info,
+                    info,
+                    source_sample_length=profile.sample_length or None,
+                    source_sample_rate=profile.sample_rate or None,
+                    marker_unit="samples",
+                    label=f"slot {slot}/{info.filename}",
+                )
+                markers_by_filename[info.filename] = normalized_markers.markers
+                for line in normalized_markers.log_lines:
+                    report(15 + int(25 * idx / total), line)
                 slot_to_profile_and_audio[slot] = (profile, info)
 
             report(45, "[V2] 构造精确 slot 映射。")
@@ -6421,6 +6745,55 @@ class MainWindow(QMainWindow):
                 create_fmod_rebuild_workspace(out, extract_template, patched_rows, audio_by_filename, progress_callback=report)
             else:
                 fmod_ready = out / FMOD_READY_WAV_DIR_NAME
+
+            final_audio_by_filename: dict[str, AudioInfo] = dict(audio_by_filename)
+            final_markers_by_filename: dict[str, SegmentMarkers] = dict(markers_by_filename)
+            if fmod_ready.exists():
+                for row in patched_rows:
+                    if not row.audio_filename or row.slot_index not in effective_assigned_slots:
+                        continue
+                    ready_path = fmod_ready / row.original_wav_relpath if row.original_wav_relpath else None
+                    if not ready_path or not ready_path.exists():
+                        continue
+                    ready_info = read_wav_info(ready_path)
+                    final_info = AudioInfo(
+                        path=ready_info.path,
+                        filename=row.audio_filename,
+                        samplerate=ready_info.samplerate,
+                        channels=ready_info.channels,
+                        bits_per_sample=ready_info.bits_per_sample,
+                        frames=ready_info.frames,
+                        duration_sec=ready_info.duration_sec,
+                    )
+                    final_audio_by_filename[row.audio_filename] = final_info
+                    marker_source_info = marker_source_info_by_filename.get(row.audio_filename)
+                    marker_data = raw_marker_json_by_filename.get(row.audio_filename, {})
+                    final_marker_result = normalize_track_markers_for_prepared_audio(
+                        marker_data,
+                        marker_source_info,
+                        final_info,
+                        source_sample_length=(marker_source_info.sample_length if marker_source_info else None),
+                        source_sample_rate=(marker_source_info.samplerate if marker_source_info else None),
+                        marker_unit="samples",
+                        label=f"slot {row.slot_index}/{row.audio_filename}",
+                    )
+                    final_markers_by_filename[row.audio_filename] = final_marker_result.markers
+                    for line in final_marker_result.log_lines:
+                        report(86, line)
+
+            xml_sync_report: list[str] = []
+            _patch_xml_by_track_order(
+                current_xml,
+                station,
+                output_xml,
+                patched_rows,
+                final_audio_by_filename,
+                final_markers_by_filename,
+                xml_sync_report=xml_sync_report,
+            )
+            xml_sync_report_path = work / "xml_marker_sync_validation.txt"
+            xml_sync_report_path.write_text("\n".join(xml_sync_report) + ("\n" if xml_sync_report else "OK\n"), encoding="utf-8")
+            report(87, f"[XML] Marker/SampleLength node sync entries: {len(xml_sync_report)}; report: {xml_sync_report_path}")
 
             manifest_path = store.export_manifest(work / "v2_project_manifest.json")
             summary = {

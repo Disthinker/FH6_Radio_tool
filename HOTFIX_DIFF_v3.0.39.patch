@@ -1,7 +1,0 @@
-v3.0.39 developer mode update
-- Added developer mode panel under Step 3.
-- Added one-click all-bank Extract research workflow.
-- Generates all_bank_extract_statistics.csv for every bank under FMODBanks.
-- Generates xml_to_bank_mapping.csv to help analyze RadioInfo XML rows and candidate bank/audio records.
-- Added developer CPU thread limit with local logical CPU count and recommended safe thread count.
-- Bank preflight/statistics work is bounded by the user thread limit; Fmod Bank Tools GUI Extract remains serialized to avoid multiple Bank Tools windows/process collisions.

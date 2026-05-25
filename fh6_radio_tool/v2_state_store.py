@@ -9,7 +9,7 @@ from typing import Any
 
 from .runtime_tools import runtime_root
 
-APP_VERSION = "3.1.3"
+APP_VERSION = "3.1.4-dev"
 DB_FILE_NAME = "fh6_radio_tool_v2.sqlite3"
 
 
@@ -220,6 +220,30 @@ class StateStore:
                 (station_name,),
             ).fetchall()
         return {int(r["slot_index"]): r["track_key"] for r in rows}
+
+    def list_assignments(self, station_name: str | None = None) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            if station_name:
+                rows = conn.execute(
+                    """
+                    SELECT station_name, slot_index, track_key, original_sound_name,
+                           original_display_name, original_artist, match_confidence, updated_at
+                    FROM slot_assignments
+                    WHERE station_name=?
+                    ORDER BY station_name COLLATE NOCASE, slot_index
+                    """,
+                    (station_name,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT station_name, slot_index, track_key, original_sound_name,
+                           original_display_name, original_artist, match_confidence, updated_at
+                    FROM slot_assignments
+                    ORDER BY station_name COLLATE NOCASE, slot_index
+                    """
+                ).fetchall()
+        return [dict(r) for r in rows]
 
     def clear_assignment(self, station_name: str, slot_index: int) -> None:
         with self.connect() as conn:

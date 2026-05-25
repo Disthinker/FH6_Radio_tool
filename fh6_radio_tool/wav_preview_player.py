@@ -86,6 +86,8 @@ class WavPreviewPlayer(QObject):
         if self._playing:
             return
 
+        if self._total_frames > 0 and self._position >= self._total_frames - 1:
+            self._position = 0
         self._start_stream_at(self._position)
 
     def pause(self) -> None:
