@@ -45,6 +45,7 @@ class WavPreviewPlayer(QObject):
         self._loop_end: int | None = None
         self._loop_enabled = False
         self._fade_frames = 0
+        self._gain_db = 0.0
 
     @property
     def samplerate(self) -> int:
@@ -72,6 +73,13 @@ class WavPreviewPlayer(QObject):
         self._position = 0
         self.clear_range()
         self.positionChanged.emit(0)
+
+    def set_gain_db(self, gain_db: float) -> None:
+        try:
+            gain = float(gain_db)
+        except Exception:
+            gain = 0.0
+        self._gain_db = max(-24.0, min(24.0, gain))
 
     def play(self) -> None:
         if self._path is None:
@@ -272,6 +280,23 @@ class WavPreviewPlayer(QObject):
         except Exception:
             return data
 
+    def _apply_playback_gain(self, data: bytes) -> bytes:
+        if not data or abs(self._gain_db) < 0.005 or self._sample_width != 2:
+            return data
+        try:
+            factor = 10.0 ** (float(self._gain_db) / 20.0)
+            samples = array("h")
+            samples.frombytes(data)
+            if sys.byteorder != "little":
+                samples.byteswap()
+            for idx, value in enumerate(samples):
+                samples[idx] = max(-32768, min(32767, int(round(value * factor))))
+            if sys.byteorder != "little":
+                samples.byteswap()
+            return samples.tobytes()
+        except Exception:
+            return data
+
     def _pump(self) -> None:
         if not self._playing or self._paused or self._sink is None or self._device is None or self._wf is None:
             return
@@ -296,6 +321,7 @@ class WavPreviewPlayer(QObject):
             return
 
         data = self._apply_range_fade(data, chunk_start, len(data) // frame_bytes)
+        data = self._apply_playback_gain(data)
         written = int(self._device.write(data))
         if written < 0:
             written = 0

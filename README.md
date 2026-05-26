@@ -2,7 +2,7 @@
 
 FH6 Radio Tool 是一个用于《Forza Horizon 6》电台音乐替换的 Windows 桌面工具。它基于 Python / PySide6 开发，重点是让普通玩家可以用自己的音乐替换游戏电台歌曲，并尽量减少手工编辑 XML、手动转换音频和手动管理备份的成本。
 
-当前版本：`v3.1.4-dev`
+当前版本：`v3.1.7`
 
 ## 功能概览
 
@@ -16,9 +16,9 @@ FH6 Radio Tool 是一个用于《Forza Horizon 6》电台音乐替换的 Windows
 - 支持主菜单 / Press Start 音乐替换：`GLB_RadioPressStart.assets.bank`。
 - 提供开发者模式，用于全 bank Extract、统计和 XML-bank 映射研究。
 
-## v3.1.4-dev 更新重点
+## v3.1.7 更新重点
 
-相比 `v3.1.3`，`v3.1.4-dev` 主要修复用户反馈的稳定性和 marker/audio 问题：
+相比 `v3.1.3`，`v3.1.7` 主要修复用户反馈的稳定性、marker/audio 和 Loop 分析问题：
 
 - Marker Export / Import 现在会导出当前已分配音乐的完整配置，可作为批量编辑模板。
 - Export 会同步当前 UI 中尚未保存的 marker 数值。
@@ -28,6 +28,10 @@ FH6 Radio Tool 是一个用于《Forza Horizon 6》电台音乐替换的 Windows
 - XML 写入前会读取最终 `fmod_ready_wav` 的真实 sample length。
 - 如果转换前后 sample 数变化，marker 会按比例缩放到最终 WAV 坐标系。
 - 应用替换时会先生成 marker 编辑用 prepared WAV，之后试听、波形和 marker 编辑都基于处理后的音频。
+- 应用替换音频改为后台任务，处理 FLAC/MP3/非 48k WAV 时界面不会卡死，并持续输出 Runtime Log。
+- 第二步试听列表始终使用 prepared WAV，非 WAV 源文件也可以正常试听、显示波形和编辑 marker。
+- 新增“游戏音量增益”和“试听游戏音量模板”，用户可在保存前实时试听 dB 调整效果。
+- 第三步生成 Mod 包 / 一键替换只复用 prepared WAV，不再重新转码或重新做音量匹配。
 - `SampleLength`、`End` 和已存在的 duration-like 字段会使用最终 WAV 的真实值。
 - 同一 `SoundName` 的重复 XML 节点会同步更新，减少改错节点导致的游戏内偏移。
 - 音频导入统一标准化为 PCM WAV、48000 Hz、Stereo、16-bit。
@@ -126,7 +130,7 @@ Stereo
 16-bit
 ```
 
-工具会分析源音频响度和峰值，应用安全增益，并在最终替换到 `fmod_ready_wav` 时对照原始 FMOD 提取音频进行轻量响度匹配。处理结果会写入 Runtime Log 和 `work/volume_match_report.csv`。
+工具会在步骤 1 “应用选择替换”时分析源音频响度和峰值，应用安全增益，并生成用于试听、波形和 marker 编辑的 prepared WAV。步骤 2 中可以通过“游戏音量增益”进行 `-6 dB` 到 `+6 dB` 的人工微调；点击“保存当前”后才会按新增益重新生成 prepared WAV。步骤 3 只复制 prepared WAV，不再重新转码或重新做音量匹配。
 
 支持 FFmpeg 可读取的常见格式，例如 WAV、FLAC、MP3、M4A、AAC、OGG、WMA。
 
@@ -201,7 +205,7 @@ setup_env.bat
 
 ### 游戏内播放位置与工具试听不一致
 
-请使用 `v3.1.4-dev` 或更新版本重新生成。新版会在写 XML 前按最终 WAV sample length 缩放 marker，并同步 `SampleLength` / `End`。
+请使用 `v3.1.7` 或更新版本重新生成。新版会在写 XML 前按最终 WAV sample length 缩放 marker，并同步 `SampleLength` / `End`。
 
 ## 文档
 

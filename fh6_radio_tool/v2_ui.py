@@ -537,6 +537,7 @@ class MainWindow(QMainWindow):
         self.current_loop_audio: Path | None = None
         self.current_loop_track_key: str | None = None
         self.current_loop_source_path: Path | None = None
+        self.current_loop_saved_gain_db = 0.0
         self.xml_candidates: list[Path] = []
         self._busy = False
         self._task_thread: QThread | None = None
@@ -664,6 +665,7 @@ class MainWindow(QMainWindow):
         self.volume_gain_spin.setSingleStep(0.5)
         self.volume_gain_spin.setSuffix(" dB")
         self.volume_gain_spin.setToolTip("Applied when saving current audio settings. The prepared WAV is regenerated only if this value changed.")
+        self.volume_gain_spin.valueChanged.connect(self.on_volume_gain_changed)
         self._updating_slider = False
         self._slider_dragging = False
 
@@ -2894,30 +2896,75 @@ class MainWindow(QMainWindow):
             path, key = sel
             row = self.slot_table.currentRow()
             sound, old_name, old_artist = self.slot_info_from_row(row)[1:]
-            self._save_one_assignment(station, slot, path, key, sound, old_name, old_artist, "manual")
-            self.log(f"[OK] {station} slot {slot} <- {path.name}")
-            self.scan_music_dir(quiet=True)
-            self.reload_slots()
+            spec = {
+                "station": station,
+                "slot": slot,
+                "path": str(path),
+                "key": key,
+                "sound": sound,
+                "old_name": old_name,
+                "old_artist": old_artist,
+                "confidence": "manual",
+            }
+            db_path = self.store.db_path
+
+            def job(report):
+                store = StateStore(db_path)
+                result = self._save_one_assignment_to_store(store, spec, report, 5, 95)
+                report(100, f"[OK] {station} slot {slot} <- {path.name}")
+                return {"results": [result], "select_key": key}
+
+            def done(result):
+                self.scan_music_dir(quiet=True)
+                self.reload_slots()
+                self.select_loop_audio_by_key(str(result.get("select_key") or key))
+
+            self.run_background_task(
+                "准备替换音频",
+                job,
+                done,
+                estimated="会立即检查格式、采样率和音量，并生成用于 Marker 编辑的 prepared WAV。",
+            )
         except Exception as exc:
             self.show_error("分配失败", exc)
 
-    def _save_one_assignment(self, station: str, slot: int, path: Path, key: str, sound: str, old_name: str, old_artist: str, confidence: str) -> None:
-        profile = self.store.load_track_profile(key)
+    def _save_one_assignment_to_store(self, store: StateStore, spec: dict, report=None, start: int = 0, end: int = 100) -> dict:
+        station = str(spec["station"])
+        slot = int(spec["slot"])
+        path = Path(str(spec["path"]))
+        key = str(spec["key"])
+        sound = str(spec.get("sound") or "")
+        old_name = str(spec.get("old_name") or "")
+        old_artist = str(spec.get("old_artist") or "")
+        confidence = str(spec.get("confidence") or "manual")
+        profile = store.load_track_profile(key)
         if not profile:
             name, artist = guess_display_artist_from_filename(path.name)
             profile = TrackProfile(key, str(path), path.name, name, artist)
         gain = profile_user_gain_db(profile)
-        self.log(f"[AUDIO] 准备 Marker 编辑用 WAV: {path.name}, user_gain={gain:.1f} dB")
+        if report:
+            report(start, f"[AUDIO] 准备 Marker 编辑用 WAV: {path.name}, user_gain={gain:.1f} dB")
         prepared_info, normalize_report, reused = self._prepare_audio_for_assignment_cache(path, existing_profile=profile, user_gain_db=gain)
         profile = self._profile_with_prepared_audio(profile, prepared_info, normalize_report, user_gain_db=gain)
-        self.store.save_track_profile(profile)
+        store.save_track_profile(profile)
         if reused:
-            self.log(f"[AUDIO] 已复用 prepared WAV，跳过音量匹配: {prepared_info.path.name}, samples={prepared_info.sample_length}")
+            if report:
+                report(end, f"[AUDIO] 已复用 prepared WAV，跳过音量匹配: {prepared_info.path.name}, samples={prepared_info.sample_length}")
         else:
-            for line in describe_audio_normalization_report(normalize_report):
-                self.log(f"[AUDIO] {path.name}: {line}")
-            self.log(f"[AUDIO] prepared WAV ready: {prepared_info.path.name}, samples={prepared_info.sample_length}")
-        self.store.save_assignment(station, slot, key, sound, old_name, old_artist, confidence)
+            if report:
+                for line in describe_audio_normalization_report(normalize_report):
+                    report(min(end, start + 70), f"[AUDIO] {path.name}: {line}")
+                report(end, f"[AUDIO] prepared WAV ready: {prepared_info.path.name}, samples={prepared_info.sample_length}")
+        store.save_assignment(station, slot, key, sound, old_name, old_artist, confidence)
+        return {
+            "station": station,
+            "slot": slot,
+            "key": key,
+            "source": str(path),
+            "prepared": str(prepared_info.path),
+            "reused": reused,
+            "sample_length": prepared_info.sample_length,
+        }
 
     def batch_assign_selected_music_to_slots(self):
         """Assign selected songs to selected slots in visible order.
@@ -2939,15 +2986,48 @@ class MainWindow(QMainWindow):
             self.warn_box("数量不一致", f"已选择 {len(slot_rows)} 个 Slot，但选择了 {len(music_rows)} 首音乐。请保持数量一致。", "Count mismatch", f"Selected {len(slot_rows)} slot(s), but selected {len(music_rows)} music file(s). Please select the same number.")
             return
         try:
-            pairs: list[str] = []
+            specs: list[dict] = []
             for slot_row, music_row in zip(slot_rows, music_rows):
                 slot, sound, old_name, old_artist = self.slot_info_from_row(slot_row)
                 path, key = self.music_path_and_key_from_row(music_row)
-                self._save_one_assignment(station, slot, path, key, sound, old_name, old_artist, "batch_order")
-                pairs.append(f"slot {slot} <- {path.name}")
-            self.log("[OK] 批量智能替换完成：\n" + "\n".join(pairs))
-            self.scan_music_dir(quiet=True)
-            self.reload_slots()
+                specs.append({
+                    "station": station,
+                    "slot": slot,
+                    "path": str(path),
+                    "key": key,
+                    "sound": sound,
+                    "old_name": old_name,
+                    "old_artist": old_artist,
+                    "confidence": "batch_order",
+                })
+            db_path = self.store.db_path
+
+            def job(report):
+                store = StateStore(db_path)
+                results = []
+                total = max(1, len(specs))
+                for index, spec in enumerate(specs, start=1):
+                    start = 5 + int((index - 1) * 90 / total)
+                    end = 5 + int(index * 90 / total)
+                    report(start, f"[AUDIO] 批量准备 {index}/{total}: {Path(str(spec['path'])).name}")
+                    results.append(self._save_one_assignment_to_store(store, spec, report, start, end))
+                report(100, f"[OK] 批量替换准备完成：{len(results)} 首")
+                return {"results": results, "select_key": specs[0]["key"] if specs else ""}
+
+            def done(result):
+                pairs = [f"slot {r['slot']} <- {Path(r['source']).name}" for r in result.get("results", [])]
+                self.log("[OK] 批量智能替换完成：\n" + "\n".join(pairs))
+                self.scan_music_dir(quiet=True)
+                self.reload_slots()
+                if result.get("select_key"):
+                    self.select_loop_audio_by_key(str(result["select_key"]))
+
+            self.run_background_task(
+                "批量准备替换音频",
+                job,
+                done,
+                estimated="会逐首检查格式、采样率和音量，并生成用于 Marker 编辑的 prepared WAV。",
+            )
         except Exception as exc:
             self.show_error("批量替换失败", exc)
 
@@ -2983,6 +3063,18 @@ class MainWindow(QMainWindow):
                 break
         if idx >= 0:
             self.loop_audio_combo.setCurrentIndex(idx)
+
+    def select_loop_audio_by_key(self, key: str) -> bool:
+        key = str(key or "")
+        for i in range(self.loop_audio_combo.count()):
+            data = self.loop_audio_combo.itemData(i)
+            if isinstance(data, dict) and str(data.get("track_key") or "") == key:
+                if self.loop_audio_combo.currentIndex() == i:
+                    self.on_loop_audio_changed()
+                else:
+                    self.loop_audio_combo.setCurrentIndex(i)
+                return True
+        return False
 
     def on_music_table_item_changed(self, item: QTableWidgetItem):
         """Persist the editable Artist column from the user's music list."""
@@ -3032,10 +3124,12 @@ class MainWindow(QMainWindow):
         self.position_label.setText("0 / 0")
         self.waveform.clear_waveform(self.ui_text("加载 WAV 后显示波形。", "Load a WAV file to show waveform."))
         profile = self.store.load_track_profile(track_key)
+        self.current_loop_saved_gain_db = profile_user_gain_db(profile)
         if hasattr(self, "volume_gain_spin"):
             self.volume_gain_spin.blockSignals(True)
-            self.volume_gain_spin.setValue(profile_user_gain_db(profile))
+            self.volume_gain_spin.setValue(self.current_loop_saved_gain_db)
             self.volume_gain_spin.blockSignals(False)
+        self.player.set_gain_db(0.0)
         try:
             if path.suffix.lower() in (".wav", ".wave"):
                 info = read_wav_info(path)
@@ -3349,6 +3443,10 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "volume_gain_spin"):
             return 0.0
         return normalize_user_gain_db(self.volume_gain_spin.value())
+
+    def on_volume_gain_changed(self, _value: float) -> None:
+        delta = self.current_user_gain_db() - normalize_user_gain_db(self.current_loop_saved_gain_db)
+        self.player.set_gain_db(delta)
 
     def play_or_resume_audio(self) -> None:
         self.reference_player.pause()
