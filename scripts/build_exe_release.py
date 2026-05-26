@@ -47,6 +47,7 @@ ENTRY = PROJECT_ROOT / "build_pyinstaller_entry.py"
 APP_ICON = PYINSTALLER_WORK / "app.ico"
 APP_ICON_B64 = PROJECT_ROOT / "resources" / "app_icon_base64.txt"
 ARCHIVE_EXTENSIONS = {".zip", ".7z", ".rar", ".tar", ".gz", ".tgz", ".bz2", ".tbz", ".xz", ".cab", ".iso"}
+LOOPFINDER_DLL_NAME = "loopfinder.dll" if os.name == "nt" else "libloopfinder.so"
 
 
 def log(msg: str) -> None:
@@ -86,6 +87,33 @@ def remove_py_caches(root: Path) -> None:
 def data_arg(src: str, dst: str) -> str:
     sep = ";" if os.name == "nt" else ":"
     return f"{src}{sep}{dst}"
+
+
+def find_loopfinder_dll_for_build() -> Path | None:
+    candidates = [
+        PROJECT_ROOT / "tools" / LOOPFINDER_DLL_NAME,
+        PROJECT_ROOT / "build_loopfinder" / "Release" / LOOPFINDER_DLL_NAME,
+        PROJECT_ROOT / "build_loopfinder" / LOOPFINDER_DLL_NAME,
+        PROJECT_ROOT / "third_party" / "loopfinder" / "build" / "Release" / LOOPFINDER_DLL_NAME,
+        PROJECT_ROOT / "third_party" / "loopfinder" / "build" / LOOPFINDER_DLL_NAME,
+    ]
+    for p in candidates:
+        if p.exists() and p.is_file():
+            return p
+    return None
+
+
+def ensure_loopfinder_dll_for_build() -> Path | None:
+    dll = find_loopfinder_dll_for_build()
+    if dll is not None:
+        return dll
+    script = PROJECT_ROOT / "scripts" / "build_loopfinder_native.py"
+    if not script.exists() or not (PROJECT_ROOT / "third_party" / "loopfinder").exists():
+        return None
+    proc = subprocess.run([sys.executable, str(script), "--allow-missing"], cwd=str(PROJECT_ROOT))
+    if proc.returncode != 0:
+        return None
+    return find_loopfinder_dll_for_build()
 
 
 def ensure_build_icon() -> bool:
@@ -190,33 +218,40 @@ def verify_nexus_package_dir(package_dir: Path) -> None:
 
 def main() -> int:
     os.chdir(PROJECT_ROOT)
-    log("[1/9] Reading version ...")
+    log("[1/10] Reading version ...")
     version = read_version()
     log(f"      Version: {version}")
 
     if os.name != "nt":
         raise RuntimeError("EXE packaging must be run on Windows. This script prepares a Windows PyInstaller build.")
 
-    log("[2/9] Checking entry files ...")
+    log("[2/10] Checking entry files ...")
     if not ENTRY.exists():
         ENTRY.write_text('from fh6_radio_tool.v2_ui import main\n\nif __name__ == "__main__":\n    raise SystemExit(main())\n', encoding="utf-8")
     for rel in ["fh6_radio_tool/app.py", "fh6_radio_tool/v2_ui.py", "requirements.txt"]:
         if not (PROJECT_ROOT / rel).exists():
             raise RuntimeError(f"Missing required file: {rel}")
 
-    log("[3/9] Python syntax check ...")
+    log("[3/10] Python syntax check ...")
     ok = compileall.compile_dir(str(PROJECT_ROOT / "fh6_radio_tool"), quiet=1, force=False)
     ok = bool(ok and compileall.compile_file(str(ENTRY), quiet=1, force=False))
     remove_py_caches(PROJECT_ROOT / "fh6_radio_tool")
     if not ok:
         raise RuntimeError("compileall failed")
 
-    log("[4/9] Cleaning previous build outputs ...")
+    log("[4/10] Preparing optional native LoopFinder DLL ...")
+    loopfinder_dll = ensure_loopfinder_dll_for_build()
+    if loopfinder_dll:
+        log(f"      LoopFinder DLL: {loopfinder_dll}")
+    else:
+        log("      [WARN] LoopFinder DLL not available; Analyze Loop will fall back to Python engines.")
+
+    log("[5/10] Cleaning previous build outputs ...")
     shutil.rmtree(PYINSTALLER_WORK, ignore_errors=True)
     shutil.rmtree(PYINSTALLER_DIST, ignore_errors=True)
     DIST_ROOT.mkdir(parents=True, exist_ok=True)
 
-    log("[5/9] Running PyInstaller one-file build ...")
+    log("[6/10] Running PyInstaller one-file build ...")
     icon_ready = ensure_build_icon()
     py = sys.executable
     cmd = [
@@ -238,6 +273,8 @@ def main() -> int:
         # some PySide6 wheels.  PyInstaller's normal PySide6 hooks collect the
         # binaries/plugins for the modules imported by the app.
         "--hidden-import", "imageio_ffmpeg",
+        "--hidden-import", "fh6_radio_tool.loopfinder_worker",
+        "--hidden-import", "fh6_radio_tool.loop_engine.seamless_loopfinder",
         "--collect-all", "imageio_ffmpeg",
         "--hidden-import", "pywinauto",
         "--hidden-import", "pywinauto.application",
@@ -259,6 +296,8 @@ def main() -> int:
     for src, dst in [("docs", "docs"), ("third_party_licenses", "third_party_licenses"), ("config", "config")]:
         if (PROJECT_ROOT / src).exists():
             cmd += ["--add-data", data_arg(str(PROJECT_ROOT / src), dst)]
+    if loopfinder_dll and loopfinder_dll.exists():
+        cmd += ["--add-binary", data_arg(str(loopfinder_dll), ".")]
     cmd.append(str(ENTRY))
     run(cmd)
 
@@ -266,7 +305,7 @@ def main() -> int:
     if not onefile_exe.exists():
         raise RuntimeError(f"PyInstaller one-file output not found: {onefile_exe}")
 
-    log("[6/9] Creating Nexus-safe portable folder without loose ICO files ...")
+    log("[7/10] Creating Nexus-safe portable folder without loose ICO files ...")
     package_name = f"FH6_Radio_Tool_v{version}_nexus_exe_portable"
     stage_root = DIST_ROOT / "_nexus_stage"
     package_dir = stage_root / package_name
@@ -281,14 +320,14 @@ def main() -> int:
     # The icon has already been embedded into FH6RadioTool.exe by PyInstaller.
     write_exe_readme(package_dir, version)
 
-    log("[7/9] Verifying Nexus-safe package folder ...")
+    log("[8/10] Verifying Nexus-safe package folder ...")
     verify_nexus_package_dir(package_dir)
 
-    log("[8/9] Creating Nexus-safe EXE portable ZIP ...")
+    log("[9/10] Creating Nexus-safe EXE portable ZIP ...")
     zip_path = DIST_ROOT / f"{package_name}.zip"
     make_zip(package_dir, zip_path, package_name)
 
-    log("[9/9] Verifying ZIP ...")
+    log("[10/10] Verifying ZIP ...")
     with zipfile.ZipFile(zip_path, "r") as zf:
         names = zf.namelist()
         if not any(n.endswith("FH6RadioTool.exe") for n in names):

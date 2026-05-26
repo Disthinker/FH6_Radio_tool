@@ -28,6 +28,11 @@ def bundled_resource_root() -> Path:
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
         return Path(meipass).resolve()
+    if is_frozen_app():
+        try:
+            return Path(__file__).resolve().parents[1]
+        except Exception:
+            pass
     return runtime_root()
 
 

@@ -4,16 +4,19 @@ import json
 import math
 import shutil
 import subprocess
+import sys
 import wave
 from array import array
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Any, Callable
 
 from .models import AudioInfo, SegmentMarkers
+from .runtime_tools import is_frozen_app
 from .segment_tools import MARKER_ORDER
 from .wav_tools import read_wav_info
 from .loop_engine.correlation_matcher import analyze_smart_loop_candidates
+from .loop_engine.seamless_loopfinder import is_loopfinder_available
 
 
 @dataclass(frozen=True)
@@ -23,9 +26,119 @@ class LoopCandidate:
     score: float
     source: str = "builtin"
     label: str = ""
+    details: dict[str, Any] | None = None
 
     def to_json(self) -> dict:
         return asdict(self)
+
+
+NATIVE_LOOPFINDER_SOURCE = "seamless_loopfinder"
+NATIVE_LOOPFINDER_MIN_PRIMARY_SCORE = 0.60
+
+_SOURCE_PRIORITY = {
+    NATIVE_LOOPFINDER_SOURCE: 0,
+    "pymusiclooper": 1,
+    "internal_smart_match_fast": 2,
+    "builtin": 3,
+}
+
+
+def _source_priority(source: str) -> int:
+    return _SOURCE_PRIORITY.get(str(source), 10)
+
+
+def _candidate_rank_key(candidate: LoopCandidate) -> tuple[int, float]:
+    priority = _source_priority(candidate.source)
+    if candidate.source == NATIVE_LOOPFINDER_SOURCE and float(candidate.score) < NATIVE_LOOPFINDER_MIN_PRIMARY_SCORE:
+        priority = 4
+    return priority, -float(candidate.score)
+
+
+def _loopfinder_worker_command() -> list[str]:
+    if is_frozen_app():
+        return [sys.executable, "--loopfinder-worker"]
+    return [sys.executable, "-m", "fh6_radio_tool.loopfinder_worker"]
+
+
+def _candidates_from_loopfinder_payload(payload: dict[str, Any]) -> list[LoopCandidate]:
+    out: list[LoopCandidate] = []
+    for i, raw in enumerate(payload.get("candidates") or [], start=1):
+        if not isinstance(raw, dict):
+            continue
+        try:
+            start = int(raw.get("loop_start", raw.get("loopStart")))
+            end = int(raw.get("loop_end", raw.get("loopEnd")))
+            score = float(raw.get("score", 0.0))
+        except Exception:
+            continue
+        if start < 0 or end <= start:
+            continue
+        note_diff = raw.get("note_diff", raw.get("noteDiff"))
+        loudness_diff = raw.get("loudness_diff", raw.get("loudnessDiff"))
+        details = {
+            "dll": payload.get("dll", ""),
+            "elapsed_sec": payload.get("elapsed_sec"),
+            "note_diff": note_diff,
+            "loudness_diff": loudness_diff,
+            "input": payload.get("input", ""),
+            "used_temp_input": payload.get("used_temp_input", False),
+        }
+        out.append(LoopCandidate(
+            start,
+            end,
+            score,
+            NATIVE_LOOPFINDER_SOURCE,
+            f"Seamless LoopFinder #{i}",
+            details,
+        ))
+    return out
+
+
+def _run_seamless_loopfinder_analysis(path: Path, top_n: int = 8, timeout_sec: int = 180) -> tuple[list[LoopCandidate], str]:
+    ok, detail = is_loopfinder_available()
+    if not ok:
+        raise FileNotFoundError(detail)
+
+    cmd = _loopfinder_worker_command() + ["--input", str(path), "--top-n", str(top_n), "--dll", detail]
+    proc = subprocess.run(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=timeout_sec,
+        creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform.startswith("win") else 0),
+    )
+    stdout = (proc.stdout or "").strip()
+    stderr = (proc.stderr or "").strip()
+    try:
+        payload = json.loads(stdout) if stdout else {}
+    except Exception as exc:
+        raise RuntimeError(f"LoopFinder worker returned invalid JSON: {exc}; stderr={stderr[:400]}") from exc
+    if proc.returncode != 0 or not payload.get("ok"):
+        err = payload.get("error") or stderr or f"worker exit {proc.returncode}"
+        raise RuntimeError(str(err))
+    candidates = _candidates_from_loopfinder_payload(payload)
+    best = max((c.score for c in candidates), default=0.0)
+    msg = (
+        f"Seamless LoopFinder returned {len(candidates)} candidate(s); "
+        f"dll={payload.get('dll')}; elapsed={payload.get('elapsed_sec')}s; best={best:.4f}."
+    )
+    if candidates:
+        first = candidates[0]
+        if first.details:
+            msg += (
+                f" note_diff={first.details.get('note_diff')}; "
+                f"loudness_diff={first.details.get('loudness_diff')}."
+            )
+    if stderr:
+        msg += f"\nLoopFinder stderr: {stderr[-800:]}"
+    return candidates, msg
+
+
+def run_seamless_loopfinder_candidates(path: Path, top_n: int = 8, timeout_sec: int = 180) -> list[LoopCandidate]:
+    candidates, _ = _run_seamless_loopfinder_analysis(path, top_n=top_n, timeout_sec=timeout_sec)
+    return candidates
 
 
 def _parse_ints_from_text(text: str) -> list[int]:
@@ -233,50 +346,77 @@ def builtin_loop_candidates(
     return out
 
 
-def analyze_loop_candidates(path: Path, top_n: int = 5, prefer_pymusiclooper: bool = True, progress_callback: Callable[[int, str], None] | None = None) -> tuple[list[LoopCandidate], str]:
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(path)
-    messages: list[str] = []
-    candidates: list[LoopCandidate] = []
-
-    # v2.2: run the internal Smart Match engine first.  This is the migrated
-    # core workflow inspired by seamless-loop-music: broad candidate search +
-    # local reverse/forward correlation refinement.  PyMusicLooper remains an
-    # optional external enhancer, not a hard dependency.
-    try:
-        if progress_callback:
-            progress_callback(2, "开始自动分析 Loop 候选；完整歌曲通常约 5–60 秒，取决于时长和 CPU。")
-        smart = analyze_smart_loop_candidates(path, top_n=top_n, progress_callback=progress_callback)
-        for i, c in enumerate(smart, start=1):
-            candidates.append(LoopCandidate(c.loop_start, c.loop_end, c.score, c.source, f"内置 Smart Match #{i}"))
-        messages.append(f"内置 Smart Match 返回 {len(smart)} 个候选。")
-    except Exception as exc:
-        messages.append(f"内置 Smart Match 未能完成：{exc}")
-
-    if len(candidates) < top_n and prefer_pymusiclooper:
-        py = run_pymusiclooper_candidates(path, top_n=top_n - len(candidates), progress_callback=progress_callback)
-        if py:
-            candidates.extend(py)
-            messages.append(f"PyMusicLooper 补充返回 {len(py)} 个候选。")
-        else:
-            messages.append("未检测到可用 PyMusicLooper 或未返回候选。")
-
-    if len(candidates) < top_n:
-        light = builtin_loop_candidates(path, top_n=top_n - len(candidates), progress_callback=progress_callback)
-        if light:
-            candidates.extend(light)
-        messages.append(f"内置轻量兜底分析补充返回 {len(light)} 个候选。")
-
-    # De-duplicate mixed sources.
-    info = read_wav_info(path)
+def _dedupe_and_rank_candidates(candidates: list[LoopCandidate], info: AudioInfo, top_n: int) -> list[LoopCandidate]:
     out: list[LoopCandidate] = []
-    for cand in sorted(candidates, key=lambda c: c.score, reverse=True):
+    for cand in sorted(candidates, key=_candidate_rank_key):
         if any(abs(cand.loop_start - p.loop_start) < info.samplerate * 2 and abs(cand.loop_end - p.loop_end) < info.samplerate * 2 for p in out):
             continue
         out.append(cand)
         if len(out) >= top_n:
             break
+    return out
+
+
+def analyze_loop_candidates(
+    path: Path,
+    top_n: int = 5,
+    prefer_pymusiclooper: bool = True,
+    prefer_loopfinder: bool = True,
+    progress_callback: Callable[[int, str], None] | None = None,
+) -> tuple[list[LoopCandidate], str]:
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(path)
+    messages: list[str] = []
+    candidates: list[LoopCandidate] = []
+    native_primary = False
+
+    if prefer_loopfinder:
+        if progress_callback:
+            progress_callback(2, "启动 Seamless LoopFinder 原生分析；失败时会自动回退。")
+        try:
+            native, msg = _run_seamless_loopfinder_analysis(path, top_n=top_n)
+            candidates.extend(native)
+            messages.append(msg)
+            best_native = max((c.score for c in native), default=0.0)
+            native_primary = bool(native and best_native >= NATIVE_LOOPFINDER_MIN_PRIMARY_SCORE)
+            if native_primary:
+                messages.append(f"Seamless LoopFinder score {best_native:.4f} accepted as primary; fallback skipped.")
+            elif native:
+                messages.append(f"Seamless LoopFinder best score {best_native:.4f} is below {NATIVE_LOOPFINDER_MIN_PRIMARY_SCORE:.2f}; fallback enabled.")
+            else:
+                messages.append("Seamless LoopFinder returned no candidates; fallback enabled.")
+        except Exception as exc:
+            messages.append(f"Seamless LoopFinder unavailable or failed: {exc}")
+
+    if not native_primary:
+        if len(candidates) < top_n and prefer_pymusiclooper:
+            py = run_pymusiclooper_candidates(path, top_n=top_n - len(candidates), progress_callback=progress_callback)
+            if py:
+                candidates.extend(py)
+                messages.append(f"PyMusicLooper fallback returned {len(py)} candidate(s).")
+            else:
+                messages.append("PyMusicLooper unavailable or returned no candidates.")
+
+        if len(candidates) < top_n:
+            try:
+                if progress_callback:
+                    progress_callback(35, "启动内置 Smart Match 回退分析。")
+                smart = analyze_smart_loop_candidates(path, top_n=top_n - len(candidates), progress_callback=progress_callback)
+                for i, c in enumerate(smart, start=1):
+                    candidates.append(LoopCandidate(c.loop_start, c.loop_end, c.score, c.source, f"内置 Smart Match #{i}"))
+                messages.append(f"Internal Smart Match fallback returned {len(smart)} candidate(s).")
+            except Exception as exc:
+                messages.append(f"Internal Smart Match fallback failed: {exc}")
+
+        if len(candidates) < top_n:
+            light = builtin_loop_candidates(path, top_n=top_n - len(candidates), progress_callback=progress_callback)
+            if light:
+                candidates.extend(light)
+            messages.append(f"Lightweight fallback returned {len(light)} candidate(s).")
+
+    info = read_wav_info(path)
+    out = _dedupe_and_rank_candidates(candidates, info, top_n)
     if progress_callback:
         progress_callback(100, f"Loop 候选分析完成：{len(out)} 个候选。")
     return out, "\n".join(messages)

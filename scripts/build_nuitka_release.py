@@ -18,6 +18,7 @@ ENTRY = PROJECT_ROOT / "build_nuitka_entry.py"
 APP_ICON = NUITKA_WORK / "app.ico"
 APP_ICON_B64 = PROJECT_ROOT / "resources" / "app_icon_base64.txt"
 ARCHIVE_EXTENSIONS = {".zip", ".7z", ".rar", ".tar", ".gz", ".tgz", ".bz2", ".tbz", ".xz", ".cab", ".iso"}
+LOOPFINDER_DLL_NAME = "loopfinder.dll" if os.name == "nt" else "libloopfinder.so"
 
 # v3.0.38: automatic Fmod Bank Tools control can use either pywinauto
 # or the built-in ctypes/Win32 fallback.  Do not fail the whole build only
@@ -75,6 +76,33 @@ def run(cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] | None =
     proc = subprocess.run(cmd, cwd=str(cwd or PROJECT_ROOT), env=env)
     if proc.returncode != 0:
         raise RuntimeError(f"Command failed with exit code {proc.returncode}: {' '.join(cmd)}")
+
+
+def find_loopfinder_dll_for_build() -> Path | None:
+    candidates = [
+        PROJECT_ROOT / "tools" / LOOPFINDER_DLL_NAME,
+        PROJECT_ROOT / "build_loopfinder" / "Release" / LOOPFINDER_DLL_NAME,
+        PROJECT_ROOT / "build_loopfinder" / LOOPFINDER_DLL_NAME,
+        PROJECT_ROOT / "third_party" / "loopfinder" / "build" / "Release" / LOOPFINDER_DLL_NAME,
+        PROJECT_ROOT / "third_party" / "loopfinder" / "build" / LOOPFINDER_DLL_NAME,
+    ]
+    for p in candidates:
+        if p.exists() and p.is_file():
+            return p
+    return None
+
+
+def ensure_loopfinder_dll_for_build() -> Path | None:
+    dll = find_loopfinder_dll_for_build()
+    if dll is not None:
+        return dll
+    script = PROJECT_ROOT / "scripts" / "build_loopfinder_native.py"
+    if not script.exists() or not (PROJECT_ROOT / "third_party" / "loopfinder").exists():
+        return None
+    proc = subprocess.run([sys.executable, str(script), "--allow-missing"], cwd=str(PROJECT_ROOT))
+    if proc.returncode != 0:
+        return None
+    return find_loopfinder_dll_for_build()
 
 
 def read_version() -> str:
@@ -231,7 +259,7 @@ def verify_windows_automation_imports() -> None:
 
 def main() -> int:
     os.chdir(PROJECT_ROOT)
-    log("[1/10] Reading version ...")
+    log("[1/11] Reading version ...")
     version = read_version()
     log(f"      Version: {version}")
 
@@ -241,10 +269,10 @@ def main() -> int:
             "Nuitka cannot cross-compile a Windows .exe from Linux/WSL in this project."
         )
 
-    log("[2/10] Checking Windows automation dependencies ...")
+    log("[2/11] Checking Windows automation dependencies ...")
     verify_windows_automation_imports()
 
-    log("[3/10] Checking entry files ...")
+    log("[3/11] Checking entry files ...")
     if not ENTRY.exists():
         ENTRY.write_text('from fh6_radio_tool.v2_ui import main\n\nif __name__ == "__main__":\n    raise SystemExit(main())\n', encoding="utf-8")
     for rel in ["fh6_radio_tool/app.py", "fh6_radio_tool/v2_ui.py", "requirements.txt"]:
@@ -252,20 +280,27 @@ def main() -> int:
             raise RuntimeError(f"Missing required file: {rel}")
     ensure_build_icon()
 
-    log("[4/10] Python syntax check ...")
+    log("[4/11] Python syntax check ...")
     ok = compileall.compile_dir(str(PROJECT_ROOT / "fh6_radio_tool"), quiet=1, force=False)
     ok = bool(ok and compileall.compile_file(str(ENTRY), quiet=1, force=False))
     remove_py_caches(PROJECT_ROOT / "fh6_radio_tool")
     if not ok:
         raise RuntimeError("compileall failed")
 
-    log("[5/10] Cleaning previous Nuitka outputs ...")
+    log("[5/11] Preparing optional native LoopFinder DLL ...")
+    loopfinder_dll = ensure_loopfinder_dll_for_build()
+    if loopfinder_dll:
+        log(f"      LoopFinder DLL: {loopfinder_dll}")
+    else:
+        log("      [WARN] LoopFinder DLL not available; Analyze Loop will fall back to Python engines.")
+
+    log("[6/11] Cleaning previous Nuitka outputs ...")
     shutil.rmtree(NUITKA_WORK, ignore_errors=True)
     shutil.rmtree(NUITKA_OUT, ignore_errors=True)
     DIST_ROOT.mkdir(parents=True, exist_ok=True)
     ensure_build_icon()
 
-    log("[6/10] Running Nuitka Windows onefile build ...")
+    log("[7/11] Running Nuitka Windows onefile build ...")
     py = sys.executable
     cmd = [
         py,
@@ -283,9 +318,13 @@ def main() -> int:
         f"--include-data-dir={PROJECT_ROOT / 'config'}=config",
         f"--include-data-dir={PROJECT_ROOT / 'third_party_licenses'}=third_party_licenses",
         "--include-package-data=imageio_ffmpeg",
+        "--include-module=fh6_radio_tool.loopfinder_worker",
+        "--include-module=fh6_radio_tool.loop_engine.seamless_loopfinder",
         f"--output-dir={NUITKA_OUT}",
         "--output-filename=FH6RadioTool.exe",
     ]
+    if loopfinder_dll and loopfinder_dll.exists():
+        cmd.append(f"--include-data-file={loopfinder_dll}=loopfinder.dll")
     for module in REQUIRED_QT_MODULES:
         cmd.append(f"--include-module={module}")
     for package in NUITKA_INCLUDE_PACKAGES:
@@ -307,7 +346,7 @@ def main() -> int:
         # semantics differ across versions; fail loudly rather than guessing.
         raise RuntimeError(f"Nuitka onefile output not found: {onefile_exe}")
 
-    log("[7/10] Creating Nexus-safe portable folder without loose ICO/source files ...")
+    log("[8/11] Creating Nexus-safe portable folder without loose ICO/source files ...")
     package_name = f"FH6_Radio_Tool_v{version}_nexus_nuitka_onefile"
     stage_root = DIST_ROOT / "_nuitka_stage"
     package_dir = stage_root / package_name
@@ -320,14 +359,14 @@ def main() -> int:
         shutil.copytree(PROJECT_ROOT / "config", package_dir / "config")
     write_exe_readme(package_dir, version)
 
-    log("[8/10] Verifying Nexus-safe package folder ...")
+    log("[9/11] Verifying Nexus-safe package folder ...")
     verify_nexus_package_dir(package_dir)
 
-    log("[9/10] Creating Nexus-safe Nuitka ZIP ...")
+    log("[10/11] Creating Nexus-safe Nuitka ZIP ...")
     zip_path = DIST_ROOT / f"{package_name}.zip"
     make_zip(package_dir, zip_path, package_name)
 
-    log("[10/10] Verifying ZIP ...")
+    log("[11/11] Verifying ZIP ...")
     with zipfile.ZipFile(zip_path, "r") as zf:
         names = zf.namelist()
         if not any(n.endswith("FH6RadioTool.exe") for n in names):
@@ -340,7 +379,7 @@ def main() -> int:
             raise RuntimeError("ZIP verification failed: source package folder found")
         log(f"      Files in ZIP: {sum(1 for n in names if not n.endswith('/'))}")
 
-    log("[11/11] Done.")
+    log("[OK] Done.")
     log("")
     log("[OK] Nexus-safe Nuitka onefile portable package created:")
     log(f"     {zip_path}")

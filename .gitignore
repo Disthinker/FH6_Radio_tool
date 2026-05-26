@@ -15,6 +15,7 @@ build_pyinstaller/
 dist_pyinstaller/
 build_nuitka/
 dist_nuitka/
+build_loopfinder/
 dist_release/
 *.build/
 *.dist/
@@ -42,6 +43,10 @@ logs/
 # Game/audio assets and external tools
 *.bank
 *.fsb
+*.dll
+*.exp
+*.lib
+*.pdb
 *.wav
 *.wave
 *.flac

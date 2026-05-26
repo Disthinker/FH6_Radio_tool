@@ -2962,7 +2962,8 @@ class MainWindow(QMainWindow):
                     from .v2_loop_tools import LoopCandidate
                     for c in profile.loop_candidates:
                         try:
-                            self.loop_candidates.append(LoopCandidate(int(c.get("loop_start", 0)), int(c.get("loop_end", 0)), float(c.get("score", 0)), str(c.get("source", "saved")), str(c.get("label", "已保存候选"))))
+                            details = c.get("details") if isinstance(c.get("details"), dict) else None
+                            self.loop_candidates.append(LoopCandidate(int(c.get("loop_start", 0)), int(c.get("loop_end", 0)), float(c.get("score", 0)), str(c.get("source", "saved")), str(c.get("label", "已保存候选")), details))
                         except Exception:
                             pass
                     self.refresh_candidate_views()
@@ -3011,6 +3012,7 @@ class MainWindow(QMainWindow):
             return
         db_path = self.store.db_path
         current_path = self.current_loop_audio
+        current_key = self.current_loop_track_key
 
         def job(report):
             store = StateStore(db_path)
@@ -3029,12 +3031,16 @@ class MainWindow(QMainWindow):
                 if profile is None:
                     profile = TrackProfile(key, str(source), source.name, display, artist)
                 analysis_path = source
+                normalize_report = None
                 try:
-                    if source.suffix.lower() not in (".wav", ".wave") or not validate_wav(source).ok:
+                    prepared_path = prepared_audio_path_from_profile(profile)
+                    if prepared_path is not None and prepared_path.exists():
+                        analysis_path = prepared_path
+                    else:
                         if ffmpeg is None:
                             ffmpeg = find_ffmpeg(None)
-                        analysis_path = loop_work / f"{safe_stem(source.name)}.wav"
-                        run_ffmpeg_normalize(source, analysis_path, ffmpeg)
+                        analysis_path = assignment_prepared_audio_path(source)
+                        normalize_report = run_ffmpeg_normalize(source, analysis_path, ffmpeg)
                     info = read_wav_info(analysis_path)
                     # Batch mode intentionally suppresses the verbose per-stage analyzer messages.
                     # The analyzer can emit many lines for every song (Smart Match, PyMusicLooper,
@@ -3059,9 +3065,10 @@ class MainWindow(QMainWindow):
                         sample_length=info.sample_length,
                         markers=marker_values_for_save(saved_markers),
                         loop_candidates=[c.to_json() for c in candidates],
+                        loudness=self._prepared_loudness_payload(profile, info, normalize_report),
                     )
                     store.save_track_profile(profile)
-                    if current_path and Path(current_path) == source:
+                    if (current_key and key == current_key) or (current_path and Path(current_path) == analysis_path):
                         last_current_candidates = candidates
                     ok += 1
                 except Exception as exc:
@@ -3096,11 +3103,24 @@ class MainWindow(QMainWindow):
         for i, c in enumerate(self.loop_candidates):
             label = f"#{i + 1}  {format_sample_time(c.loop_start, samplerate)} → {format_sample_time(c.loop_end, samplerate)}  score={c.score:.4f}  {c.source}"
             self.candidate_combo.addItem(label, i)
+            tooltip = ""
+            if c.details:
+                detail_bits = []
+                for key in ("note_diff", "loudness_diff", "elapsed_sec", "dll"):
+                    value = c.details.get(key)
+                    if value not in (None, ""):
+                        detail_bits.append(f"{key}: {value}")
+                tooltip = "\n".join(detail_bits)
             set_item(self.candidate_table, i, 0, i + 1, data=i)
             set_item(self.candidate_table, i, 1, c.loop_start)
             set_item(self.candidate_table, i, 2, c.loop_end)
             set_item(self.candidate_table, i, 3, f"{c.score:.4f}")
             set_item(self.candidate_table, i, 4, c.source)
+            if tooltip:
+                for col in range(self.candidate_table.columnCount()):
+                    item = self.candidate_table.item(i, col)
+                    if item:
+                        item.setToolTip(tooltip)
         self.candidate_combo.blockSignals(False)
         self.candidate_table.blockSignals(False)
         if self.loop_candidates:
@@ -3110,6 +3130,29 @@ class MainWindow(QMainWindow):
             self.candidate_summary_label.setText(f"已找到 {len(self.loop_candidates)} 个候选。当前首选：{format_sample_time(best.loop_start, samplerate)} → {format_sample_time(best.loop_end, samplerate)}，score={best.score:.4f}。")
         else:
             self.candidate_summary_label.setText("没有可用候选；可以直接用进度条试听并手动写入 Marker。")
+
+    @staticmethod
+    def _prepared_loudness_payload(profile: TrackProfile, prepared_info: AudioInfo, normalize_report: AudioNormalizationReport | None) -> dict:
+        loudness = dict(profile.loudness or {})
+        loudness.update({
+            "prepared_audio_path": str(prepared_info.path),
+            "prepared_sample_rate": prepared_info.samplerate,
+            "prepared_sample_length": prepared_info.sample_length,
+            "prepared_duration_sec": prepared_info.duration_sec,
+            "prepared_basis": "loop_analysis",
+        })
+        if normalize_report is not None:
+            loudness.update({
+                "source_sample_rate": normalize_report.source_sample_rate,
+                "source_sample_length_estimate": normalize_report.source_sample_length_estimate(),
+                "source_duration_sec": normalize_report.source_duration_sec,
+                "source_mean_dbfs": normalize_report.source_mean_dbfs,
+                "source_peak_dbfs": normalize_report.source_peak_dbfs,
+                "target_dbfs": normalize_report.target_dbfs,
+                "applied_gain_db": normalize_report.applied_gain_db,
+                "peak_limited": normalize_report.peak_limited,
+            })
+        return loudness
 
     def selected_candidate(self):
         idx = self.candidate_combo.currentData()
