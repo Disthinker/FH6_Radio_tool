@@ -48,7 +48,7 @@ from .segment_tools import (
 )
 from .v2_deploy_tools import create_backup_snapshot, ensure_initial_state_snapshot, restore_initial_state, restore_snapshot
 from .v2_game_tools import resolve_fmod_bank_root, scan_game_root, write_scan_report
-from .v2_loop_tools import analyze_loop_candidates, markers_from_candidate
+from .v2_loop_tools import LoopCandidate, analyze_loop_candidates, markers_from_candidate
 from .loop_engine.scene_preview import build_scene_preview_plan
 from .fmod_automation import (
     collect_rebuilt_banks as fmod_collect_rebuilt_banks,
@@ -291,6 +291,38 @@ def format_sample_time(sample: int, samplerate: int) -> str:
     return f"{int(sample)} ({m:02d}:{s:05.2f})"
 
 
+class MarkerSpinBox(QSpinBox):
+    """Display marker sentinel values as user-facing states."""
+
+    def __init__(self, marker_name: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.marker_name = marker_name
+
+    def textFromValue(self, value: int) -> str:  # noqa: N802 - Qt override
+        value_i = int(value)
+        if self.marker_name in ADVANCED_DISABLE_MARKERS:
+            if value_i == -1:
+                return "AUTO"
+            if value_i == ADVANCED_DISABLE_SENTINEL:
+                return "DISABLE"
+        elif value_i == -1:
+            return "UNSET"
+        return str(value_i)
+
+    def valueFromText(self, text: str) -> int:  # noqa: N802 - Qt override
+        raw = (text or "").strip().lower()
+        if raw in {"auto", "自动"} and self.marker_name in ADVANCED_DISABLE_MARKERS:
+            return -1
+        if raw in {"disable", "disabled", "off", "禁用"}:
+            return ADVANCED_DISABLE_SENTINEL if self.marker_name in ADVANCED_DISABLE_MARKERS else -1
+        if raw in {"unset", "none", "未设置"}:
+            return -1
+        try:
+            return int(raw)
+        except Exception:
+            return self.value()
+
+
 def safe_default_marker_values(max_sample: int) -> dict[str, int]:
     """Player-safe default markers for normal custom songs.
 
@@ -324,15 +356,7 @@ NO_LOOP_SENTINEL_MARKERS = {
 
 
 def marker_values_for_save(markers: dict[str, int]) -> dict[str, int]:
-    """Persist safe marker values, including explicit -1 no-loop sentinels.
-
-    For normal custom songs users often want TrackLoopEnd/PostRaceLoopEnd and
-    DJ/Stinger markers to stay disabled.  Older code dropped all negative
-    values before saving, so the XML writer later regenerated LoopEnd as End,
-    which made the UI say "no loop" while the generated XML still contained
-    a full-length loop.  Keep -1 for the specific markers where -1 means
-    "disabled / do not trigger".
-    """
+    """Persist marker sentinel values instead of dropping all negatives."""
     result: dict[str, int] = {}
     for name, value in markers.items():
         value_i = int(value)
@@ -1248,11 +1272,13 @@ class MainWindow(QMainWindow):
                 label = QLabel(name)
                 label.setMinimumWidth(125)
                 label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                spin = QSpinBox()
+                spin = MarkerSpinBox(name)
                 spin.setRange(-2, 2_147_483_647)
                 spin.setValue(-1)
                 spin.setMinimumWidth(135)
                 spin.setMaximumWidth(170)
+                if name in ADVANCED_DISABLE_MARKERS:
+                    spin.setToolTip("AUTO: generated from the original slot and final WAV length. DISABLE: write -1 to XML.")
                 spin.valueChanged.connect(lambda _value, _name=name: self.refresh_waveform_markers())
                 self.marker_spins[name] = spin
                 row_layout.addWidget(label)
@@ -1273,6 +1299,12 @@ class MainWindow(QMainWindow):
         self.btn_apply_safe_markers.clicked.connect(self.apply_safe_markers_to_current_audio)
         self.btn_apply_safe_markers_all = QPushButton("全部无循环")
         self.btn_apply_safe_markers_all.clicked.connect(self.apply_safe_markers_to_all_audio)
+        self.btn_apply_best_loop = QPushButton("应用首选循环")
+        self.btn_apply_best_loop.clicked.connect(lambda: self.apply_first_candidate_to_current("both"))
+        self.btn_apply_best_track = QPushButton("应用首选 Track")
+        self.btn_apply_best_track.clicked.connect(lambda: self.apply_first_candidate_to_current("track"))
+        self.btn_apply_best_loop_all = QPushButton("全部首选循环")
+        self.btn_apply_best_loop_all.clicked.connect(lambda: self.apply_first_candidate_to_all_audio("both"))
         self.btn_save_loop_profile = QPushButton("保存当前")
         self.btn_save_loop_profile.clicked.connect(self.save_current_loop_profile)
         self.btn_save_all_loop_profiles = QPushButton("保存全部")
@@ -1285,6 +1317,9 @@ class MainWindow(QMainWindow):
         marker_buttons = [
             self.btn_apply_safe_markers,
             self.btn_apply_safe_markers_all,
+            self.btn_apply_best_loop,
+            self.btn_apply_best_track,
+            self.btn_apply_best_loop_all,
             self.btn_save_loop_profile,
             self.btn_save_all_loop_profiles,
             self.btn_import_markers,
@@ -1296,10 +1331,13 @@ class MainWindow(QMainWindow):
 
         marker_action_grid.addWidget(self.btn_apply_safe_markers, 0, 0)
         marker_action_grid.addWidget(self.btn_apply_safe_markers_all, 0, 1)
-        marker_action_grid.addWidget(self.btn_save_loop_profile, 0, 2)
-        marker_action_grid.addWidget(self.btn_save_all_loop_profiles, 1, 0)
-        marker_action_grid.addWidget(self.btn_import_markers, 1, 1)
-        marker_action_grid.addWidget(self.btn_export_marker_template, 1, 2)
+        marker_action_grid.addWidget(self.btn_apply_best_loop, 0, 2)
+        marker_action_grid.addWidget(self.btn_apply_best_track, 1, 0)
+        marker_action_grid.addWidget(self.btn_apply_best_loop_all, 1, 1)
+        marker_action_grid.addWidget(self.btn_save_loop_profile, 1, 2)
+        marker_action_grid.addWidget(self.btn_save_all_loop_profiles, 2, 0)
+        marker_action_grid.addWidget(self.btn_import_markers, 2, 1)
+        marker_action_grid.addWidget(self.btn_export_marker_template, 2, 2)
         marker_outer.addWidget(marker_action_box)
         outer.addWidget(marker_box)
         outer.addStretch(1)
@@ -1552,6 +1590,9 @@ class MainWindow(QMainWindow):
             'btn_save_all_loop_profiles': ("Save all", "保存全部"),
             'btn_apply_safe_markers': ("No Loop / Safe", "应用无循环"),
             'btn_apply_safe_markers_all': ("No Loop / Safe to All", "全部无循环"),
+            'btn_apply_best_loop': ("Use best loop", "应用首选循环"),
+            'btn_apply_best_track': ("Use best Track", "应用首选 Track"),
+            'btn_apply_best_loop_all': ("Best loop to All", "全部首选循环"),
             'btn_import_markers': ("Import markers", "导入 Marker"),
             'btn_export_marker_template': ("Export template", "导出模板"),
             'btn_dev_full_audio_scan': ("Extract all banks and generate statistics/mapping tables", "一键 Extract 全部 Bank 并生成统计/映射表"),
@@ -2959,11 +3000,9 @@ class MainWindow(QMainWindow):
                     markers.update({k: int(v) for k, v in profile.markers.items()})
                 if profile and profile.loop_candidates:
                     self.loop_candidates = []
-                    from .v2_loop_tools import LoopCandidate
                     for c in profile.loop_candidates:
                         try:
-                            details = c.get("details") if isinstance(c.get("details"), dict) else None
-                            self.loop_candidates.append(LoopCandidate(int(c.get("loop_start", 0)), int(c.get("loop_end", 0)), float(c.get("score", 0)), str(c.get("source", "saved")), str(c.get("label", "已保存候选")), details))
+                            self.loop_candidates.append(self._loop_candidate_from_json(c, default_label="已保存候选"))
                         except Exception:
                             pass
                     self.refresh_candidate_views()
@@ -3154,6 +3193,18 @@ class MainWindow(QMainWindow):
             })
         return loudness
 
+    @staticmethod
+    def _loop_candidate_from_json(data: dict, *, default_label: str = "saved") -> LoopCandidate:
+        details = data.get("details") if isinstance(data.get("details"), dict) else None
+        return LoopCandidate(
+            int(data.get("loop_start", 0)),
+            int(data.get("loop_end", 0)),
+            float(data.get("score", 0)),
+            str(data.get("source", "saved")),
+            str(data.get("label", default_label)),
+            details,
+        )
+
     def selected_candidate(self):
         idx = self.candidate_combo.currentData()
         if idx is not None:
@@ -3169,6 +3220,11 @@ class MainWindow(QMainWindow):
         if row < 0 or row >= len(self.loop_candidates):
             return None
         return self.loop_candidates[row]
+
+    def first_candidate(self):
+        if not self.loop_candidates:
+            return None
+        return self.loop_candidates[0]
 
     def on_candidate_combo_changed(self):
         idx = self.candidate_combo.currentData()
@@ -3351,22 +3407,131 @@ class MainWindow(QMainWindow):
         self.player.seek_sample(value)
         self.log(f"[NUDGE] {name} = {value} ({delta:+d})")
 
-    def apply_selected_candidate(self, mode: str):
+    def _apply_candidate_to_marker_spins(self, cand: LoopCandidate, mode: str) -> bool:
         path = self.current_loop_audio
+        if not path:
+            self.warn_box("未选择音频", "请先选择一个音频。", "No audio selected", "Please select an audio file first.")
+            return False
+        info = read_wav_info(path)
+        markers = markers_from_candidate(info, cand, mode=mode)
+        current = {name: int(spin.value()) for name, spin in self.marker_spins.items()}
+        current.update(markers.positions)
+        for name, spin in self.marker_spins.items():
+            spin.setValue(int(current.get(name, -1)))
+        self.refresh_waveform_markers()
+        return True
+
+    def apply_selected_candidate(self, mode: str):
         cand = self.selected_candidate()
-        if not path or not cand:
+        if not cand:
             self.warn_box("缺少候选", "请先分析并选择一个 Loop 候选。", "Missing candidate", "Please analyze and select a Loop candidate first.")
             return
         try:
-            info = read_wav_info(path)
-            markers = markers_from_candidate(info, cand, mode=mode)
-            current = {name: spin.value() for name, spin in self.marker_spins.items() if spin.value() >= 0}
-            current.update(markers.positions)
-            for name, spin in self.marker_spins.items():
-                spin.setValue(int(current.get(name, -1)))
-            self.log(f"[OK] 已把候选 {cand.loop_start}..{cand.loop_end} 填入 {mode}。")
+            if self._apply_candidate_to_marker_spins(cand, mode):
+                self.log(f"[OK] 已把候选 {cand.loop_start}..{cand.loop_end} 填入 {mode}。")
         except Exception as exc:
             self.show_error("填入候选失败", exc)
+
+    def apply_first_candidate_to_current(self, mode: str):
+        cand = self.first_candidate()
+        if not cand:
+            self.warn_box(
+                "缺少首选候选",
+                "当前歌曲还没有 Loop 候选。请先点击“分析当前”或“批量分析全部歌曲”。",
+                "Missing best candidate",
+                "The current song has no loop candidate yet. Analyze the current song or all songs first.",
+            )
+            return
+        try:
+            self.candidate_combo.setCurrentIndex(0)
+            if self._apply_candidate_to_marker_spins(cand, mode):
+                self.log(f"[OK] 已自动使用第 1 个候选 {cand.loop_start}..{cand.loop_end} 填入 {mode}。")
+        except Exception as exc:
+            self.show_error("应用首选候选失败", exc)
+
+    def _audio_info_for_loop_profile(self, path: Path, profile: TrackProfile | None) -> AudioInfo | None:
+        info = prepared_audio_info_from_profile(profile)
+        if info is not None:
+            return info
+        if path.suffix.lower() in (".wav", ".wave"):
+            try:
+                return read_wav_info(path)
+            except Exception:
+                return None
+        if profile and int(profile.sample_rate or 0) > 0 and int(profile.sample_length or 0) > 0:
+            sample_rate = int(profile.sample_rate or 48000)
+            sample_length = int(profile.sample_length or 0)
+            return AudioInfo(
+                path=Path(profile.source_path),
+                filename=profile.filename or path.name,
+                samplerate=sample_rate,
+                channels=2,
+                bits_per_sample=16,
+                frames=sample_length,
+                duration_sec=sample_length / sample_rate,
+            )
+        return None
+
+    def apply_first_candidate_to_all_audio(self, mode: str):
+        paths = list(self.audio_paths)
+        if not paths:
+            self.warn_box("没有音乐", "请先选择并扫描音乐目录。", "No music", "Please choose and scan a music folder first.")
+            return
+        if not self.question_box(
+            "确认批量应用首选 Loop",
+            "将对已有 Loop 候选的歌曲自动使用第 1 个候选填入 Track/Post Loop。\n"
+            "没有候选的歌曲会跳过；这会覆盖这些歌曲已经保存的 Loop Marker 设置。是否继续？",
+            "Apply best loop to all?",
+            "This will use the first saved loop candidate for each song with candidates and overwrite saved loop markers. Songs without candidates will be skipped. Continue?",
+        ):
+            return
+
+        saved = 0
+        skipped = 0
+        current_key = self.current_loop_track_key
+        for path in paths:
+            try:
+                key = track_key_for_path(path)
+                profile = self.store.load_track_profile(key)
+                candidate_data = list(profile.loop_candidates or []) if profile else []
+                if current_key and key == current_key and self.loop_candidates:
+                    candidate_data = [self.loop_candidates[0].to_json()]
+                if not candidate_data:
+                    skipped += 1
+                    continue
+                cand = self._loop_candidate_from_json(candidate_data[0], default_label="best candidate")
+                info = self._audio_info_for_loop_profile(path, profile)
+                if info is None:
+                    skipped += 1
+                    self.log(f"[MARKER][WARN] {path.name}: 缺少 prepared WAV 信息，已跳过首选循环。")
+                    continue
+                display, artist = guess_display_artist_from_filename(path.name)
+                if profile is None:
+                    profile = TrackProfile(key, str(path), path.name, display, artist)
+                base_markers = dict(safe_default_marker_values(max(0, info.sample_length - 1)))
+                if profile.markers:
+                    base_markers.update({k: int(v) for k, v in profile.markers.items()})
+                base_markers.update(markers_from_candidate(info, cand, mode=mode).positions)
+                profile = replace(
+                    profile,
+                    source_path=profile.source_path or str(path),
+                    filename=profile.filename or path.name,
+                    display_name=profile.display_name or display,
+                    artist=profile.artist or artist,
+                    sample_rate=info.samplerate,
+                    sample_length=info.sample_length,
+                    markers=marker_values_for_save(base_markers),
+                )
+                self.store.save_track_profile(profile)
+                saved += 1
+            except Exception as exc:
+                skipped += 1
+                self.log(f"[MARKER][WARN] {path.name}: {exc}")
+
+        if self.current_loop_audio:
+            self.on_loop_audio_changed()
+        self.reload_slots()
+        self.log(f"[OK] 已对 {saved} 首歌曲应用第 1 个 Loop 候选；跳过 {skipped} 首。")
 
     def apply_safe_markers_to_current_audio(self):
         path = self.current_loop_audio
