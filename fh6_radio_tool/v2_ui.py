@@ -17,12 +17,22 @@ from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QGridLayout, QGroupBox, QLabel,
     QLineEdit, QMainWindow, QMessageBox, QPushButton, QPlainTextEdit,
-    QProgressBar, QSlider, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QDoubleSpinBox, QProgressBar, QSlider, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout,
     QHBoxLayout, QWidget, QScrollArea, QStackedWidget, QInputDialog, QSizePolicy
 )
 
 from .async_tools import BackgroundTask
 from .bank_tools import choose_banks, make_bank_plan, write_bank_plan_outputs
+from .audio_cache_tools import (
+    MAX_USER_GAIN_DB,
+    MIN_USER_GAIN_DB,
+    loudness_user_gain_db,
+    normalize_user_gain_db,
+    prepared_audio_cache_key,
+    prepared_cache_matches_gain,
+    prepared_cache_matches_source,
+    source_audio_signature,
+)
 from .ffmpeg_tools import AudioNormalizationReport, describe_audio_normalization_report, find_ffmpeg, run_ffmpeg_normalize, safe_stem
 from .metadata_tools import guess_display_artist_from_filename
 from .models import AudioInfo, SegmentMarkers
@@ -57,6 +67,7 @@ from .fmod_automation import (
     prepare_extract_job, prepare_rebuild_job, copy_banks_to_tool_bank_dir,
 )
 from .v2_state_store import APP_VERSION, StateStore, TrackProfile
+from .volume_reference_tools import ensure_volume_reference_wav
 from .marker_import_tools import MarkerImportRow, normalize_match_text, read_marker_import_file, write_marker_import_template, IMPORT_COLUMNS, EXPORT_COLUMNS
 from .marker_normalization import normalize_track_markers_for_prepared_audio
 from .wav_preview_player import WavPreviewPlayer
@@ -415,19 +426,17 @@ def assignment_prepared_audio_dir() -> Path:
 
 
 def assignment_prepared_cache_key(source: Path) -> str:
-    source = Path(source)
-    try:
-        stat = source.stat()
-        payload = f"{source.resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
-    except Exception:
-        payload = str(source)
-    return hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    return assignment_prepared_cache_key_for_gain(source, 0.0)
 
 
-def assignment_prepared_audio_path(source: Path) -> Path:
+def assignment_prepared_cache_key_for_gain(source: Path, user_gain_db: float = 0.0) -> str:
+    return prepared_audio_cache_key(source, user_gain_db)
+
+
+def assignment_prepared_audio_path(source: Path, user_gain_db: float = 0.0) -> Path:
     source = Path(source)
     stem = safe_stem(source.stem, 72)
-    return assignment_prepared_audio_dir() / f"{stem}_{assignment_prepared_cache_key(source)}.wav"
+    return assignment_prepared_audio_dir() / f"{stem}_{assignment_prepared_cache_key_for_gain(source, user_gain_db)}.wav"
 
 
 def prepared_audio_path_from_profile(profile: TrackProfile | None) -> Path | None:
@@ -459,6 +468,10 @@ def prepared_audio_info_from_profile(profile: TrackProfile | None) -> AudioInfo 
         frames=info.frames,
         duration_sec=info.duration_sec,
     )
+
+
+def profile_user_gain_db(profile: TrackProfile | None) -> float:
+    return loudness_user_gain_db(profile.loudness if profile is not None else None)
 
 
 def app_icon_path() -> Path | None:
@@ -515,6 +528,7 @@ class MainWindow(QMainWindow):
 
         self.store = StateStore(project_work_dir() / "fh6_radio_tool_v2.sqlite3")
         self.player = WavPreviewPlayer(self)
+        self.reference_player = WavPreviewPlayer(self)
         self.current_xml: Path | None = None
         self.station_infos = []
         self.audio_paths: list[Path] = []
@@ -644,6 +658,12 @@ class MainWindow(QMainWindow):
         self.preview_seconds_spin = QSpinBox()
         self.preview_seconds_spin.setRange(1, 30)
         self.preview_seconds_spin.setValue(5)
+        self.volume_gain_spin = QDoubleSpinBox()
+        self.volume_gain_spin.setRange(MIN_USER_GAIN_DB, MAX_USER_GAIN_DB)
+        self.volume_gain_spin.setDecimals(1)
+        self.volume_gain_spin.setSingleStep(0.5)
+        self.volume_gain_spin.setSuffix(" dB")
+        self.volume_gain_spin.setToolTip("Applied when saving current audio settings. The prepared WAV is regenerated only if this value changed.")
         self._updating_slider = False
         self._slider_dragging = False
 
@@ -1234,6 +1254,23 @@ class MainWindow(QMainWindow):
         playback_row.addWidget(self.btn_stop)
         seek_layout.addLayout(playback_row)
 
+        volume_row = QHBoxLayout()
+        volume_row.setSpacing(8)
+        self.lbl_volume_gain = QLabel("游戏音量增益")
+        self.lbl_volume_gain.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.volume_gain_spin.setFixedWidth(105)
+        self.btn_preview_volume_reference = QPushButton("试听游戏音量模板")
+        self.btn_preview_volume_reference.setMinimumWidth(150)
+        self.btn_preview_volume_reference.clicked.connect(self.preview_game_volume_reference)
+        self.volume_hint_label = QLabel("保存当前时才会按该 dB 重新生成 prepared WAV；步骤 3 只复用。")
+        self.volume_hint_label.setObjectName("CompactHint")
+        self.volume_hint_label.setWordWrap(True)
+        volume_row.addWidget(self.lbl_volume_gain)
+        volume_row.addWidget(self.volume_gain_spin)
+        volume_row.addWidget(self.btn_preview_volume_reference)
+        volume_row.addWidget(self.volume_hint_label, 1)
+        seek_layout.addLayout(volume_row)
+
         marker_row = QHBoxLayout()
         self.marker_target_combo.addItems([name for name in MARKER_ORDER if name != "DJDrop"])
         self.lbl_marker_target = QLabel("目标 Marker")
@@ -1549,6 +1586,7 @@ class MainWindow(QMainWindow):
             'lbl_candidate': ("Candidate", "候选段落"),
             'lbl_preview_seconds': ("Preview seconds", "试听秒数"),
             'lbl_preview_scene': ("Scene preview", "场景试听"),
+            'lbl_volume_gain': ("Game volume gain", "游戏音量增益"),
             'lbl_marker_target': ("Target Marker", "目标 Marker"),
             'log_title_label': ("Log", "日志 / Log"),
             'lbl_dev_threads': ("Max CPU threads", "最大 CPU 线程"),
@@ -1579,6 +1617,7 @@ class MainWindow(QMainWindow):
             'btn_analyze_current_loop': ("Analyze current", "分析当前"),
             'btn_preview_candidate': ("Preview loop", "试听候选"),
             'btn_preview_scene': ("Preview scene", "试听场景"),
+            'btn_preview_volume_reference': ("Preview game volume", "试听游戏音量模板"),
             'btn_apply_track': ("Use as Track Loop", "填入 Track Loop"),
             'btn_apply_post': ("Use as Post Loop", "填入 Post Loop"),
             'btn_apply_both': ("Use as Track/Post", "同时填入 Track/Post"),
@@ -1630,6 +1669,12 @@ class MainWindow(QMainWindow):
                 "For researching DJ, stinger, SFX, and XML→bank relationships. This mode only extracts and generates statistics; it does not write XML, rebuild banks, or overwrite game files. If previous scan data is found, the tool will ask whether to delete it and retest or reuse the existing cache. Fmod Bank Tools Extract is kept serial; precheck/statistics/CSV stages are automatically scheduled within the CPU thread limit above."
                 if en else
                 "用于研究 DJ、stinger、音效和 XML→bank 关系。该模式只 Extract/统计，不写 XML、不 Rebuild、不覆盖游戏文件。如果发现已有扫描记录，工具会询问是否删除旧记录并重新测试，或复用已有缓存。Fmod Bank Tools Extract 仍会串行执行；预检查、统计和 CSV 生成会在不超过上方设置的线程数内自动分配。"
+            )
+        if hasattr(self, 'volume_hint_label'):
+            self.volume_hint_label.setText(
+                "Regenerates the prepared WAV only when you save current settings; Step 3 only reuses it."
+                if en else
+                "保存当前时才会按该 dB 重新生成 prepared WAV；步骤 3 只复用。"
             )
         self._refresh_station_combo_labels()
         if hasattr(self, 'main_menu_mode_combo'):
@@ -2861,12 +2906,13 @@ class MainWindow(QMainWindow):
         if not profile:
             name, artist = guess_display_artist_from_filename(path.name)
             profile = TrackProfile(key, str(path), path.name, name, artist)
-        self.log(f"[AUDIO] 准备 Marker 编辑用 WAV: {path.name}")
-        prepared_info, normalize_report, reused = self._prepare_audio_for_assignment_cache(path, existing_profile=profile)
-        profile = self._profile_with_prepared_audio(profile, prepared_info, normalize_report)
+        gain = profile_user_gain_db(profile)
+        self.log(f"[AUDIO] 准备 Marker 编辑用 WAV: {path.name}, user_gain={gain:.1f} dB")
+        prepared_info, normalize_report, reused = self._prepare_audio_for_assignment_cache(path, existing_profile=profile, user_gain_db=gain)
+        profile = self._profile_with_prepared_audio(profile, prepared_info, normalize_report, user_gain_db=gain)
         self.store.save_track_profile(profile)
         if reused:
-            self.log(f"[AUDIO] 已复用 prepared WAV: {prepared_info.path.name}, samples={prepared_info.sample_length}")
+            self.log(f"[AUDIO] 已复用 prepared WAV，跳过音量匹配: {prepared_info.path.name}, samples={prepared_info.sample_length}")
         else:
             for line in describe_audio_normalization_report(normalize_report):
                 self.log(f"[AUDIO] {path.name}: {line}")
@@ -2985,6 +3031,11 @@ class MainWindow(QMainWindow):
         self.seek_slider.setRange(0, 0)
         self.position_label.setText("0 / 0")
         self.waveform.clear_waveform(self.ui_text("加载 WAV 后显示波形。", "Load a WAV file to show waveform."))
+        profile = self.store.load_track_profile(track_key)
+        if hasattr(self, "volume_gain_spin"):
+            self.volume_gain_spin.blockSignals(True)
+            self.volume_gain_spin.setValue(profile_user_gain_db(profile))
+            self.volume_gain_spin.blockSignals(False)
         try:
             if path.suffix.lower() in (".wav", ".wave"):
                 info = read_wav_info(path)
@@ -2993,7 +3044,6 @@ class MainWindow(QMainWindow):
                 self.seek_slider.setRange(0, max_sample)
                 self.position_label.setText(f"0 / {format_sample_time(max_sample, info.samplerate)}")
                 self.load_waveform_for_current_audio(path, info)
-                profile = self.store.load_track_profile(track_key)
                 defaults = safe_default_marker_values(max_sample)
                 markers = dict(defaults)
                 if profile and profile.markers:
@@ -3078,8 +3128,9 @@ class MainWindow(QMainWindow):
                     else:
                         if ffmpeg is None:
                             ffmpeg = find_ffmpeg(None)
-                        analysis_path = assignment_prepared_audio_path(source)
-                        normalize_report = run_ffmpeg_normalize(source, analysis_path, ffmpeg)
+                        gain = profile_user_gain_db(profile)
+                        analysis_path = assignment_prepared_audio_path(source, gain)
+                        normalize_report = run_ffmpeg_normalize(source, analysis_path, ffmpeg, user_gain_db=gain)
                     info = read_wav_info(analysis_path)
                     # Batch mode intentionally suppresses the verbose per-stage analyzer messages.
                     # The analyzer can emit many lines for every song (Smart Match, PyMusicLooper,
@@ -3094,6 +3145,7 @@ class MainWindow(QMainWindow):
                     saved_markers = dict(safe_default_marker_values(max(0, info.sample_length - 1)))
                     if profile.markers:
                         saved_markers.update({k: int(v) for k, v in profile.markers.items()})
+                    profile_for_payload = replace(profile, source_path=str(source), filename=source.name)
                     profile = replace(
                         profile,
                         source_path=str(source),
@@ -3104,7 +3156,7 @@ class MainWindow(QMainWindow):
                         sample_length=info.sample_length,
                         markers=marker_values_for_save(saved_markers),
                         loop_candidates=[c.to_json() for c in candidates],
-                        loudness=self._prepared_loudness_payload(profile, info, normalize_report),
+                        loudness=self._prepared_loudness_payload(profile_for_payload, info, normalize_report),
                     )
                     store.save_track_profile(profile)
                     if (current_key and key == current_key) or (current_path and Path(current_path) == analysis_path):
@@ -3173,13 +3225,16 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _prepared_loudness_payload(profile: TrackProfile, prepared_info: AudioInfo, normalize_report: AudioNormalizationReport | None) -> dict:
         loudness = dict(profile.loudness or {})
+        source_path = Path(profile.source_path)
         loudness.update({
             "prepared_audio_path": str(prepared_info.path),
             "prepared_sample_rate": prepared_info.samplerate,
             "prepared_sample_length": prepared_info.sample_length,
             "prepared_duration_sec": prepared_info.duration_sec,
             "prepared_basis": "loop_analysis",
+            "user_gain_db": profile_user_gain_db(profile),
         })
+        loudness.update(source_audio_signature(source_path))
         if normalize_report is not None:
             loudness.update({
                 "source_sample_rate": normalize_report.source_sample_rate,
@@ -3290,12 +3345,28 @@ class MainWindow(QMainWindow):
         finally:
             self._updating_slider = False
 
+    def current_user_gain_db(self) -> float:
+        if not hasattr(self, "volume_gain_spin"):
+            return 0.0
+        return normalize_user_gain_db(self.volume_gain_spin.value())
+
     def play_or_resume_audio(self) -> None:
+        self.reference_player.pause()
         self.player.play()
 
     def reset_player_to_start(self) -> None:
         self.player.stop()
         self.update_position_ui(0)
+
+    def preview_game_volume_reference(self) -> None:
+        try:
+            self.player.pause()
+            path = ensure_volume_reference_wav()
+            self.reference_player.set_source(path)
+            self.reference_player.play()
+            self.set_progress(0, self.ui_text("正在试听游戏音量参考模板。", "Playing game-volume reference."))
+        except Exception as exc:
+            self.show_error("试听音量模板失败", exc)
 
     def begin_seek_drag(self) -> None:
         self._slider_dragging = True
@@ -3612,12 +3683,44 @@ class MainWindow(QMainWindow):
             key = self.current_loop_track_key or track_key_for_path(path)
             source_path = self.current_loop_source_path or path
             profile = self.store.load_track_profile(key)
-            info = read_wav_info(path) if path.suffix.lower() in (".wav", ".wave") else None
+            gain = self.current_user_gain_db()
             markers = marker_values_for_save({name: int(spin.value()) for name, spin in self.marker_spins.items()})
             candidates = [c.to_json() for c in self.loop_candidates]
             if profile is None:
                 display, artist = guess_display_artist_from_filename(source_path.name)
                 profile = TrackProfile(key, str(source_path), source_path.name, display, artist)
+            old_gain = profile_user_gain_db(profile)
+            prepared_path = prepared_audio_path_from_profile(profile)
+            should_reprepare = (
+                prepared_path is None
+                or abs(old_gain - gain) >= 0.005
+                or not prepared_cache_matches_gain(profile.loudness, gain)
+            )
+            if should_reprepare:
+                prepared_info, normalize_report, reused = self._prepare_audio_for_assignment_cache(
+                    source_path,
+                    existing_profile=profile,
+                    user_gain_db=gain,
+                )
+                profile = self._profile_with_prepared_audio(profile, prepared_info, normalize_report, user_gain_db=gain)
+                info = prepared_info
+                idx = self.loop_audio_combo.currentIndex()
+                data = self.loop_audio_combo.itemData(idx)
+                if isinstance(data, dict):
+                    data = dict(data)
+                    data["path"] = str(prepared_info.path)
+                    data["source_path"] = str(source_path)
+                    data["track_key"] = key
+                    self.loop_audio_combo.setItemData(idx, data)
+                self.current_loop_audio = prepared_info.path
+                if reused:
+                    self.log(f"[AUDIO] 音量增益 {gain:.1f} dB 已有 prepared WAV，直接复用: {prepared_info.path.name}")
+                else:
+                    for line in describe_audio_normalization_report(normalize_report):
+                        self.log(f"[AUDIO] {source_path.name}: {line}")
+                    self.log(f"[AUDIO] 已按用户音量增益 {gain:.1f} dB 重新生成 prepared WAV: {prepared_info.path.name}")
+            else:
+                info = read_wav_info(path) if path.suffix.lower() in (".wav", ".wave") else prepared_audio_info_from_profile(profile)
             profile = replace(
                 profile,
                 source_path=profile.source_path or str(source_path),
@@ -3630,6 +3733,8 @@ class MainWindow(QMainWindow):
             self.store.save_track_profile(profile)
             self._sync_profile_to_segments_json(profile)
             self.log(f"[OK] 已保存当前音频设置: {profile.filename}")
+            if should_reprepare:
+                self.on_loop_audio_changed()
             self.reload_slots()
         except Exception as exc:
             self.show_error("保存音频设置失败", exc)
@@ -5629,30 +5734,12 @@ class MainWindow(QMainWindow):
 
         self.run_background_task("导入 Fmod Extract 模板", job, done, estimated="取决于 wav 数量和磁盘速度，通常数秒到数十秒。")
 
-    def _prepare_audio_for_generation(self, source: Path, slot_index: int, dst_dir: Path) -> tuple[AudioInfo, AudioNormalizationReport]:
-        dst_dir.mkdir(parents=True, exist_ok=True)
-        stem = safe_stem(f"slot_{slot_index:02d}_{source.stem}", 90)
-        dst = dst_dir / f"{stem}.wav"
-        ffmpeg = find_ffmpeg(None)
-        normalize_report = run_ffmpeg_normalize(source, dst, ffmpeg)
-        info = read_wav_info(dst)
-        audio = AudioInfo(
-            path=dst,
-            filename=dst.name,
-            samplerate=info.samplerate,
-            channels=info.channels,
-            bits_per_sample=info.bits_per_sample,
-            frames=info.frames,
-            duration_sec=info.duration_sec,
-        )
-        return audio, normalize_report
-
     def _prepare_profile_audio_for_generation(
         self,
         profile: TrackProfile,
         slot_index: int,
         dst_dir: Path,
-    ) -> tuple[AudioInfo, AudioNormalizationReport | None]:
+    ) -> tuple[AudioInfo, None]:
         source = Path(profile.source_path)
         dst_dir.mkdir(parents=True, exist_ok=True)
         stem = safe_stem(f"slot_{slot_index:02d}_{source.stem}", 90)
@@ -5673,18 +5760,52 @@ class MainWindow(QMainWindow):
                 ),
                 None,
             )
-        return self._prepare_audio_for_generation(source, slot_index, dst_dir)
+        raise RuntimeError(
+            f"slot {slot_index} 缺少已准备 WAV。请回到步骤 1 对该音乐重新点击“应用选择替换”，"
+            "让工具先完成格式/采样率/音量处理后再生成。"
+        )
 
     def _prepare_audio_for_assignment_cache(
         self,
         source: Path,
         *,
         existing_profile: TrackProfile | None = None,
+        user_gain_db: float | None = None,
     ) -> tuple[AudioInfo, AudioNormalizationReport | None, bool]:
         source = Path(source)
-        dst = assignment_prepared_audio_path(source)
+        gain = normalize_user_gain_db(profile_user_gain_db(existing_profile) if user_gain_db is None else user_gain_db)
+        dst = assignment_prepared_audio_path(source, gain)
         cached_path = prepared_audio_path_from_profile(existing_profile)
-        if cached_path is not None and cached_path == dst and dst.exists():
+        if cached_path is not None and cached_path.exists():
+            cache_matches = (
+                cached_path == dst
+                or (
+                    prepared_cache_matches_source(
+                        existing_profile.loudness if existing_profile is not None else None,
+                        source,
+                    )
+                    and prepared_cache_matches_gain(
+                        existing_profile.loudness if existing_profile is not None else None,
+                        gain,
+                    )
+                )
+            )
+            if cache_matches:
+                info = read_wav_info(cached_path)
+                return (
+                    AudioInfo(
+                        path=info.path,
+                        filename=source.name,
+                        samplerate=info.samplerate,
+                        channels=info.channels,
+                        bits_per_sample=info.bits_per_sample,
+                        frames=info.frames,
+                        duration_sec=info.duration_sec,
+                    ),
+                    None,
+                    True,
+                )
+        if dst.exists():
             info = read_wav_info(dst)
             return (
                 AudioInfo(
@@ -5700,7 +5821,7 @@ class MainWindow(QMainWindow):
                 True,
             )
         ffmpeg = find_ffmpeg(None)
-        report = run_ffmpeg_normalize(source, dst, ffmpeg)
+        report = run_ffmpeg_normalize(source, dst, ffmpeg, user_gain_db=gain)
         info = read_wav_info(dst)
         return (
             AudioInfo(
@@ -5721,7 +5842,9 @@ class MainWindow(QMainWindow):
         profile: TrackProfile,
         prepared_info: AudioInfo,
         normalize_report: AudioNormalizationReport | None,
+        user_gain_db: float | None = None,
     ) -> TrackProfile:
+        gain = normalize_user_gain_db(profile_user_gain_db(profile) if user_gain_db is None else user_gain_db)
         old_markers = dict(profile.markers or {})
         old_source_info = marker_source_info_for_profile(profile, normalize_report)
         if old_markers:
@@ -5745,7 +5868,9 @@ class MainWindow(QMainWindow):
             "prepared_sample_length": prepared_info.sample_length,
             "prepared_duration_sec": prepared_info.duration_sec,
             "prepared_basis": "assignment",
+            "user_gain_db": gain,
         })
+        loudness.update(source_audio_signature(Path(profile.source_path)))
         if normalize_report is not None:
             loudness.update({
                 "source_sample_rate": normalize_report.source_sample_rate,
@@ -5833,7 +5958,7 @@ class MainWindow(QMainWindow):
         report(5, "[V2] 创建 XML 备份快照。")
         snapshot = create_backup_snapshot([current_xml], bak, label=backup_label)
 
-        report(15, "[V2] 准备已分配音频；非 WAV 会调用 ffmpeg 转码。")
+        report(15, "[V2] 复制步骤 1 已准备音频；步骤 3 不重新转码或音量匹配。")
         prepared_dir = work / "v2_prepared_audio"
         if prepared_dir.exists():
             shutil.rmtree(prepared_dir, ignore_errors=True)
@@ -5856,7 +5981,7 @@ class MainWindow(QMainWindow):
             info, normalize_report = self._prepare_profile_audio_for_generation(profile, slot, prepared_dir)
             audio_by_filename[info.filename] = info
             if normalize_report is None:
-                report(15 + int(25 * idx / total), f"[AUDIO] slot {slot}: reused assignment prepared WAV")
+                report(15 + int(25 * idx / total), f"[AUDIO] slot {slot}: reused assignment prepared WAV; skipped loudness matching")
             else:
                 for line in describe_audio_normalization_report(normalize_report):
                     report(15 + int(25 * idx / total), f"[AUDIO] slot {slot}: {line}")
@@ -7025,7 +7150,7 @@ class MainWindow(QMainWindow):
             report(5, "[V2] 创建备份快照。")
             snapshot = create_backup_snapshot([current_xml], bak, label="v2_xml")
 
-            report(15, "[V2] 准备已分配音频；非 WAV 会调用 ffmpeg 转码。")
+            report(15, "[V2] 复制步骤 1 已准备音频；步骤 3 不重新转码或音量匹配。")
             prepared_dir = work / "v2_prepared_audio"
             if prepared_dir.exists():
                 shutil.rmtree(prepared_dir, ignore_errors=True)
@@ -7047,7 +7172,7 @@ class MainWindow(QMainWindow):
                 info, normalize_report = self._prepare_profile_audio_for_generation(profile, slot, prepared_dir)
                 audio_by_filename[info.filename] = info
                 if normalize_report is None:
-                    report(15 + int(25 * idx / total), f"[AUDIO] slot {slot}: reused assignment prepared WAV")
+                    report(15 + int(25 * idx / total), f"[AUDIO] slot {slot}: reused assignment prepared WAV; skipped loudness matching")
                 else:
                     for line in describe_audio_normalization_report(normalize_report):
                         report(15 + int(25 * idx / total), f"[AUDIO] slot {slot}: {line}")
