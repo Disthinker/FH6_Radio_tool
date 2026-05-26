@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from .segment_tools import MARKER_ORDER
+from .segment_tools import ADVANCED_DISABLE_MARKERS, ADVANCED_DISABLE_SENTINEL, MARKER_ORDER, NEGATIVE_SENTINEL_MARKERS
 
 CONTEXT_COLUMNS = [
     "station",
@@ -90,6 +90,7 @@ _ALT_HEADERS = {
 }
 
 _CLEAR_TOKENS = {"clear", "null", "none", "delete", "remove", "<clear>"}
+_DISABLE_TOKENS = {"disable", "disabled", "off", "<disable>"}
 
 @dataclass(frozen=True)
 class MarkerImportRow:
@@ -163,13 +164,25 @@ def _parse_optional_int(value: object) -> int | None:
         return None
 
 
-def _parse_marker_value(value: object, *, marker_unit: str = "samples", sample_rate: int = 0) -> int | None | object:
+def _parse_marker_value(
+    value: object,
+    *,
+    marker_name: str,
+    marker_unit: str = "samples",
+    sample_rate: int = 0,
+) -> int | None | object:
     if value is None:
         return ...
     text = str(value).strip()
     if text == "":
         return ...
     if text.lower() in _CLEAR_TOKENS:
+        return None
+    if text.lower() in _DISABLE_TOKENS:
+        if marker_name in ADVANCED_DISABLE_MARKERS:
+            return ADVANCED_DISABLE_SENTINEL
+        if marker_name in NEGATIVE_SENTINEL_MARKERS:
+            return -1
         return None
     try:
         number = float(text)
@@ -203,7 +216,12 @@ def _row_from_dict(raw: dict[str, object], source_row: int) -> MarkerImportRow:
     for marker_name in MARKER_ORDER:
         if marker_name not in row:
             continue
-        parsed = _parse_marker_value(row.get(marker_name), marker_unit=marker_unit, sample_rate=sample_rate)
+        parsed = _parse_marker_value(
+            row.get(marker_name),
+            marker_name=marker_name,
+            marker_unit=marker_unit,
+            sample_rate=sample_rate,
+        )
         if parsed is ...:
             continue
         markers[marker_name] = parsed  # None means explicit clear.

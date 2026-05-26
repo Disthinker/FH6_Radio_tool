@@ -11,6 +11,7 @@ SEGMENTS_FILE_NAME = "segments.json"
 # UI 与 XML 写入使用的 Marker 顺序。
 MARKER_ORDER = [
     "TrackStart",
+    "DJDrop",
     "TrackDrop",
     "TrackLoopStart",
     "TrackLoopEnd",
@@ -23,9 +24,13 @@ MARKER_ORDER = [
     "End",
 ]
 
+CONTROL_AUTO_MARKERS = {"DJSegment", "StingerStart", "DJStart"}
+ADVANCED_DISABLE_SENTINEL = -2
+
 # 给普通用户看的简短说明。尽量避免过度技术化。
 MARKER_DESCRIPTIONS = {
     "TrackStart": "歌曲开始",
+    "DJDrop": "DJ 后接入点",
     "TrackDrop": "比赛高潮点",
     "TrackLoopStart": "比赛循环起点",
     "TrackLoopEnd": "比赛循环终点",
@@ -57,6 +62,7 @@ def clamp_marker(value: int, max_sample: int) -> int:
 
 def default_markers_for_audio(audio: AudioInfo) -> SegmentMarkers:
     # 普通自定义歌曲的安全默认值：Drop/LoopStart 从 0 开始，LoopEnd 保持未设置。
+    # DJ/Stinger 的 -1 在 XML 写入阶段表示 AUTO，会按原 slot 模板和最终 WAV 长度推导。
     # End 始终使用音频真实结尾，避免误把 LoopEnd 当 End 导致游戏里只播放几秒。
     return SegmentMarkers({
         "TrackStart": 0,
@@ -74,6 +80,7 @@ def default_markers_for_audio(audio: AudioInfo) -> SegmentMarkers:
 
 
 NEGATIVE_SENTINEL_MARKERS = {"TrackLoopEnd", "PostRaceLoopEnd", "DJSegment", "StingerStart", "DJStart"}
+ADVANCED_DISABLE_MARKERS = CONTROL_AUTO_MARKERS
 
 
 def markers_to_json(markers: SegmentMarkers) -> dict:
@@ -83,7 +90,11 @@ def markers_to_json(markers: SegmentMarkers) -> dict:
         if value is None:
             continue
         value_i = int(value)
-        if value_i >= 0 or (name in NEGATIVE_SENTINEL_MARKERS and value_i == -1):
+        if (
+            value_i >= 0
+            or (name in NEGATIVE_SENTINEL_MARKERS and value_i == -1)
+            or (name in ADVANCED_DISABLE_MARKERS and value_i == ADVANCED_DISABLE_SENTINEL)
+        ):
             data[name] = value_i
     return data
 
@@ -113,6 +124,8 @@ def markers_from_json(data: dict, audio: AudioInfo | None = None) -> SegmentMark
         if value < 0:
             if name in NEGATIVE_SENTINEL_MARKERS and value == -1:
                 positions[name] = -1
+            elif name in ADVANCED_DISABLE_MARKERS and value == ADVANCED_DISABLE_SENTINEL:
+                positions[name] = ADVANCED_DISABLE_SENTINEL
             continue
         positions[name] = clamp_marker(value, max_sample)
 

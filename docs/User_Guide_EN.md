@@ -92,25 +92,27 @@ The names below are based on the current FH radio XML workflow and community tes
 
 - **TrackDrop**: A high-energy entry point for the track, usually used around race start or when the game wants to jump into a stronger part of the song. A good placement is the first chorus/drop/main beat after the intro. If the song has no clear drop, use `TrackLoopStart` or a musically strong point.
 
+- **DJDrop**: The point where music resumes after a DJ/radio host line. Normal users should leave it automatic so the tool can derive it from the original XML slot and final WAV length.
+
 - **PostDrop**: A transition point used for finish/post-race style playback. A good placement is a chorus, final drop, or another energetic section that sounds natural after the race finish. If unsure, place it near `PostRaceLoopStart` or reuse a strong chorus/drop point.
 
-- **DJSegment**: A marker related to DJ/radio segment insertion. For normal custom song replacement, this is usually not needed. If you do not have a specific DJ segment, leave it as `-1`.
+- **DJSegment**: A marker related to DJ/radio segment insertion. For normal custom song replacement, leave it automatic instead of copying an old-song coordinate.
 
-- **DJStart**: The start point for a DJ/radio voice segment. For normal music replacement, leave it as `-1` unless you intentionally prepare a DJ/voice section.
+- **DJStart**: The point near the end of music where a DJ/radio voice can enter. The tool automatically places it close to the end of the final WAV.
 
-- **StingerStart**: A marker for a short stinger/transition sound. Most custom songs do not need this. Leave it as `-1` unless you know the track has a dedicated stinger section.
+- **StingerStart**: A marker for a short stinger/transition sound. It is usually `1000` samples before `DJStart`, and the tool keeps that relationship automatically.
 
 ### Practical recommendations
 
 For most custom songs, start with this simple strategy:
 
 1. Set `TrackStart` to `0`.
-2. Set `End` to the final sample of the file.
+2. `SampleLength` is the total sample count; set `End` to the final sample index, which is `SampleLength - 1`.
 3. Choose a stable chorus or main beat loop for `TrackLoopStart` and `TrackLoopEnd`.
 4. Set `TrackDrop` to the first strong drop/chorus after the intro.
 5. Set `PostDrop` to a strong chorus/final drop, or near `PostRaceLoopStart`.
 6. Set `PostRaceLoopStart` and `PostRaceLoopEnd` to a section that can loop after a race.
-7. Leave `DJSegment`, `DJStart`, and `StingerStart` as `-1` unless you specifically need them.
+7. Leave `DJDrop`, `DJSegment`, `DJStart`, and `StingerStart` automatic. Advanced users can write `DISABLE` in CSV only when they explicitly want XML `-1`.
 
 Automatic loop candidates are only a helper. Manual preview and fine tuning are still strongly recommended.
 
@@ -197,7 +199,7 @@ How to use:
 
 Recommended CSV columns:
 
-`MatchName, Filename, DisplayName, Artist, SampleRate, SampleLength, TrackStart, TrackDrop, TrackLoopStart, TrackLoopEnd, PostDrop, PostRaceLoopStart, PostRaceLoopEnd, DJSegment, StingerStart, DJStart, End`
+`MatchName, Filename, DisplayName, Artist, SampleRate, SampleLength, TrackStart, DJDrop, TrackDrop, TrackLoopStart, TrackLoopEnd, PostDrop, PostRaceLoopStart, PostRaceLoopEnd, DJSegment, StingerStart, DJStart, End`
 
 Note: After importing, manual preview is still recommended, especially for TrackLoop and PostRaceLoop transitions.
 

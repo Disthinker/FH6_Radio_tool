@@ -4,7 +4,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .models import AudioInfo, SegmentMarkers
-from .segment_tools import MARKER_ORDER, NEGATIVE_SENTINEL_MARKERS, markers_from_json, markers_to_json
+from .segment_tools import (
+    ADVANCED_DISABLE_MARKERS,
+    ADVANCED_DISABLE_SENTINEL,
+    MARKER_ORDER,
+    NEGATIVE_SENTINEL_MARKERS,
+    markers_from_json,
+    markers_to_json,
+)
 
 
 POST_LOOP_ALIASES = {
@@ -75,14 +82,18 @@ def _convert_marker(
     warnings: list[str],
 ) -> int | None:
     try:
+        raw_number = float(raw_value)
+        raw_int = int(raw_number)
+        if raw_int < 0:
+            if name in NEGATIVE_SENTINEL_MARKERS and raw_int == -1:
+                return -1
+            if name in ADVANCED_DISABLE_MARKERS and raw_int == ADVANCED_DISABLE_SENTINEL:
+                return ADVANCED_DISABLE_SENTINEL
+            return None
         if marker_unit.lower() in {"second", "seconds", "sec", "s"}:
-            value = round(float(raw_value) * prepared_audio_info.samplerate)
+            value = round(raw_number * prepared_audio_info.samplerate)
         else:
-            value_i = int(float(raw_value))
-            if value_i < 0:
-                if name in NEGATIVE_SENTINEL_MARKERS and value_i == -1:
-                    return -1
-                return None
+            value_i = raw_int
             if source_rate and source_rate > 0 and not scale:
                 value = round((value_i / source_rate) * prepared_audio_info.samplerate)
             else:

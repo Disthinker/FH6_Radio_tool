@@ -27,6 +27,7 @@ FH6 Radio Tool 是一个用于《Forza Horizon 6》电台音乐替换的 Windows
 - 波形上显示 TrackDrop / PostDrop 竖线，以及 TrackLoop / PostRaceLoop 区间。
 - XML 写入前会读取最终 `fmod_ready_wav` 的真实 sample length。
 - 如果转换前后 sample 数变化，marker 会按比例缩放到最终 WAV 坐标系。
+- 应用替换时会先生成 marker 编辑用 prepared WAV，之后试听、波形和 marker 编辑都基于处理后的音频。
 - `SampleLength`、`End` 和已存在的 duration-like 字段会使用最终 WAV 的真实值。
 - 同一 `SoundName` 的重复 XML 节点会同步更新，减少改错节点导致的游戏内偏移。
 - 音频导入统一标准化为 PCM WAV、48000 Hz、Stereo、16-bit。
@@ -131,7 +132,7 @@ Stereo
 
 ## Marker 与 XML 写入说明
 
-工具内部 marker 使用 sample 坐标。生成 XML 前，工具会以最终 prepared / ready WAV 为准重新计算：
+工具内部 marker 使用 sample 坐标。普通替换流程中，用户点击应用替换后会先生成 prepared WAV；之后的试听、波形和 marker 编辑都基于该 prepared WAV。生成 XML 前，工具仍会以最终 ready WAV 为准复核：
 
 - `TrackDrop`
 - `PostDrop`

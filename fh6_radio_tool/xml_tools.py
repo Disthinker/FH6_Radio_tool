@@ -7,11 +7,12 @@ from pathlib import Path
 
 from .metadata_tools import TrackMetadata
 from .models import AudioInfo, SegmentMarkers, StationInfo, TrackPatch
-from .segment_tools import MARKER_ORDER
+from .segment_tools import ADVANCED_DISABLE_SENTINEL, CONTROL_AUTO_MARKERS, MARKER_ORDER
 
 
 PLAYBACK_MARKERS = [
     "TrackStart",
+    "DJDrop",
     "TrackDrop",
     "TrackLoopStart",
     "TrackLoopEnd",
@@ -23,6 +24,7 @@ PLAYBACK_MARKERS = [
 
 CONTROL_MARKERS = ["DJSegment", "StingerStart", "DJStart"]
 NEGATIVE_SENTINEL_MARKERS = {"TrackLoopEnd", "PostRaceLoopEnd", "DJSegment", "StingerStart", "DJStart"}
+DJ_STINGER_OFFSET_SAMPLES = 1000
 
 
 def parse_xml(xml_path: Path) -> ET.ElementTree:
@@ -139,10 +141,83 @@ def _clear_known_markers(sample: ET.Element, marker_names: list[str] | set[str] 
             sample.remove(marker)
 
 
-def _safe_marker_positions(markers: SegmentMarkers, audio: AudioInfo) -> dict[str, int]:
+def _sample_length(sample: ET.Element) -> int:
+    try:
+        return int(sample.get("SampleLength", "0") or 0)
+    except Exception:
+        return 0
+
+
+def _sample_marker_positions(sample: ET.Element) -> dict[str, int]:
+    positions: dict[str, int] = {}
+    for name in MARKER_ORDER:
+        raw = _get_marker_value(sample, name)
+        if raw == "":
+            continue
+        try:
+            positions[name] = int(float(raw))
+        except Exception:
+            continue
+    return positions
+
+
+def _scale_template_marker(template: dict[str, int], template_length: int, audio: AudioInfo, name: str) -> int | None:
+    value = template.get(name)
+    if value is None or value < 0 or template_length <= 0:
+        return None
+    end_sample = max(0, int(audio.sample_length) - 1)
+    scaled = int(round((float(value) / float(template_length)) * float(audio.sample_length)))
+    return max(0, min(scaled, end_sample))
+
+
+def _bounded_tail_samples(raw_tail: int | None, audio: AudioInfo) -> int:
+    final_length = max(0, int(audio.sample_length))
+    if final_length <= 2:
+        return 1
+    sample_rate = max(1, int(audio.samplerate or 48000))
+    fallback = 2 * sample_rate
+    tail = int(raw_tail if raw_tail and raw_tail > 0 else fallback)
+    min_tail = min(sample_rate, max(1, final_length // 4))
+    max_tail = min(5 * sample_rate, max(1, final_length - 2))
+    if min_tail > max_tail:
+        min_tail = max_tail
+    return max(min_tail, min(tail, max_tail))
+
+
+def _clamp_position(value: int, audio: AudioInfo) -> int:
+    end_sample = max(0, int(audio.sample_length) - 1)
+    return max(0, min(int(value), end_sample))
+
+
+def _auto_djdrop(raw: dict[str, int], template: dict[str, int], template_length: int, audio: AudioInfo, positions: dict[str, int]) -> int:
+    if int(raw.get("DJDrop", -1)) >= 0:
+        return _clamp_position(int(raw["DJDrop"]), audio)
+
+    scaled = _scale_template_marker(template, template_length, audio, "DJDrop")
+    if scaled is None:
+        scaled = _scale_template_marker(template, template_length, audio, "TrackDrop")
+    if scaled is None:
+        scaled = int(positions.get("TrackStart", 0))
+
+    # If the user deliberately set a non-zero TrackDrop, keep DJDrop no later
+    # than that point.  A default TrackDrop=0 is treated as "no authored value"
+    # so the original slot template can still provide a useful post-DJ entry.
+    track_drop = int(raw.get("TrackDrop", -1))
+    if track_drop > 0:
+        scaled = min(scaled, int(positions.get("TrackDrop", track_drop)))
+    return _clamp_position(int(scaled), audio)
+
+
+def _safe_marker_positions(
+    markers: SegmentMarkers,
+    audio: AudioInfo,
+    template_sample: ET.Element | None = None,
+) -> dict[str, int]:
     end_sample = max(0, int(audio.sample_length) - 1)
     raw = dict(markers.positions or {})
     positions: dict[str, int] = {}
+    template = _sample_marker_positions(template_sample) if template_sample is not None else {}
+    template_length = _sample_length(template_sample) if template_sample is not None else 0
 
     def clamp(value: object, default: int, *, allow_negative_sentinel: bool = False) -> int:
         try:
@@ -151,6 +226,8 @@ def _safe_marker_positions(markers: SegmentMarkers, audio: AudioInfo) -> dict[st
             value_i = int(default)
         if allow_negative_sentinel and value_i == -1:
             return -1
+        if allow_negative_sentinel and value_i == ADVANCED_DISABLE_SENTINEL:
+            return ADVANCED_DISABLE_SENTINEL
         return max(0, min(value_i, end_sample))
 
     start_default = clamp(raw.get("TrackStart", 0), 0)
@@ -170,11 +247,14 @@ def _safe_marker_positions(markers: SegmentMarkers, audio: AudioInfo) -> dict[st
     }
 
     for name in PLAYBACK_MARKERS:
+        if name == "DJDrop":
+            continue
         positions[name] = clamp(
             raw.get(name, defaults[name]),
             defaults[name],
             allow_negative_sentinel=name in NEGATIVE_SENTINEL_MARKERS,
         )
+    positions["DJDrop"] = _auto_djdrop(raw, template, template_length, audio, positions)
 
     for start_name, end_name in [
         ("TrackLoopStart", "TrackLoopEnd"),
@@ -188,25 +268,75 @@ def _safe_marker_positions(markers: SegmentMarkers, audio: AudioInfo) -> dict[st
     return positions
 
 
-def _explicit_control_marker_positions(markers: SegmentMarkers, audio: AudioInfo) -> dict[str, int]:
+def _auto_djsegment(raw: dict[str, int], template: dict[str, int], template_length: int, audio: AudioInfo) -> int:
+    if int(raw.get("DJSegment", -1)) == ADVANCED_DISABLE_SENTINEL:
+        return -1
+    if int(raw.get("DJSegment", -1)) >= 0:
+        return _clamp_position(int(raw["DJSegment"]), audio)
+
+    final_length = max(1, int(audio.sample_length))
+    scaled = _scale_template_marker(template, template_length, audio, "DJSegment")
+    if scaled is None:
+        scaled = int(round(final_length * 0.5))
+    low = int(round(final_length * 0.25))
+    high = int(round(final_length * 0.75))
+    if low > high:
+        low = high = _clamp_position(scaled, audio)
+    return _clamp_position(max(low, min(int(scaled), high)), audio)
+
+
+def _auto_dj_start(template: dict[str, int], template_length: int, audio: AudioInfo) -> int:
+    end_sample = max(0, int(audio.sample_length) - 1)
+    template_djstart = template.get("DJStart")
+    tail = None
+    if template_djstart is not None and template_djstart >= 0 and template_length > 0:
+        tail = template_length - template_djstart
+    bounded_tail = _bounded_tail_samples(tail, audio)
+    if end_sample <= DJ_STINGER_OFFSET_SAMPLES + 1:
+        return max(1, end_sample)
+    return max(DJ_STINGER_OFFSET_SAMPLES, min(end_sample - 1, end_sample - bounded_tail))
+
+
+def _control_marker_positions(
+    markers: SegmentMarkers,
+    audio: AudioInfo,
+    template_sample: ET.Element | None = None,
+) -> tuple[dict[str, int], list[str]]:
     end_sample = max(0, int(audio.sample_length) - 1)
     raw = dict(markers.positions or {})
     positions: dict[str, int] = {}
+    warnings: list[str] = []
+    template = _sample_marker_positions(template_sample) if template_sample is not None else {}
+    template_length = _sample_length(template_sample) if template_sample is not None else 0
 
-    for name in CONTROL_MARKERS:
-        if name not in raw:
-            continue
-        try:
-            value = int(raw[name])
-        except Exception:
-            continue
-        if value == -1:
-            positions[name] = -1
-            continue
-        if value < 0:
-            continue
-        positions[name] = max(0, min(value, end_sample))
-    return positions
+    positions["DJSegment"] = _auto_djsegment(raw, template, template_length, audio)
+
+    raw_stinger = int(raw.get("StingerStart", -1))
+    raw_djstart = int(raw.get("DJStart", -1))
+    if raw_stinger == ADVANCED_DISABLE_SENTINEL or raw_djstart == ADVANCED_DISABLE_SENTINEL:
+        positions["StingerStart"] = -1
+        positions["DJStart"] = -1
+        return positions, warnings
+
+    if raw_djstart >= 0:
+        djstart = _clamp_position(raw_djstart, audio)
+    elif raw_stinger >= 0:
+        djstart = _clamp_position(raw_stinger + DJ_STINGER_OFFSET_SAMPLES, audio)
+    else:
+        djstart = _auto_dj_start(template, template_length, audio)
+
+    if end_sample > 0 and djstart >= end_sample:
+        warnings.append("DJStart reached End; moved before final sample")
+        djstart = max(1, end_sample - 1)
+
+    stinger = max(0, djstart - DJ_STINGER_OFFSET_SAMPLES)
+    if raw_stinger >= 0 and raw_djstart >= 0 and raw_djstart - raw_stinger != DJ_STINGER_OFFSET_SAMPLES:
+        warnings.append("StingerStart adjusted so DJStart-StingerStart=1000")
+    if stinger >= djstart:
+        stinger = max(0, djstart - 1)
+    positions["StingerStart"] = stinger
+    positions["DJStart"] = djstart
+    return positions, warnings
 
 
 def _set_marker(sample: ET.Element, name: str, position: int) -> None:
@@ -268,8 +398,8 @@ def patch_station_samples(
                 if candidate is not primary and candidate.get("SoundName", "") == sound_name:
                     target_samples.append(candidate)
 
-        safe_positions = _safe_marker_positions(patch.markers, patch.audio)
-        control_positions = _explicit_control_marker_positions(patch.markers, patch.audio)
+        safe_positions = _safe_marker_positions(patch.markers, patch.audio, primary)
+        control_positions, control_warnings = _control_marker_positions(patch.markers, patch.audio, primary)
 
         for sample in target_samples:
             # Keep SoundName from the original XML; rebuilt banks reuse original
@@ -293,6 +423,8 @@ def patch_station_samples(
             sync_report.append(
                 f"slot {patch.slot_index}: sound_name={sound_name or '<empty>'}, synced_nodes={len(target_samples)}"
             )
+            for warning in control_warnings:
+                sync_report.append(f"WARN: slot {patch.slot_index}: {warning}")
 
     return new_tree
 
@@ -306,12 +438,16 @@ def validate_station_patch_consistency(
     samples = get_track_samples(station)
     warnings: list[str] = []
     key_markers = [
+        "DJDrop",
         "TrackDrop",
         "PostDrop",
         "TrackLoopStart",
         "TrackLoopEnd",
         "PostRaceLoopStart",
         "PostRaceLoopEnd",
+        "DJSegment",
+        "StingerStart",
+        "DJStart",
         "End",
     ]
 
