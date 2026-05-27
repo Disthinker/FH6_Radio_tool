@@ -539,6 +539,8 @@ class MainWindow(QMainWindow):
         self.current_loop_source_path: Path | None = None
         self.current_loop_saved_gain_db = 0.0
         self.xml_candidates: list[Path] = []
+        self._dynamic_station_slot_profiles_cache: dict[str, dict[str, object]] | None = None
+        self._syncing_table_checks = False
         self._busy = False
         self._task_thread: QThread | None = None
         self._task_worker: BackgroundTask | None = None
@@ -646,11 +648,11 @@ class MainWindow(QMainWindow):
         self.candidate_summary_label = QLabel("尚未分析候选。")
         self.candidate_summary_label.setWordWrap(True)
         self.preview_scenario_combo = QComboBox()
-        self.preview_scenario_combo.addItem("漫游模式：Track Loop 循环", "roam_loop")
+        self.preview_scenario_combo.addItem("漫游模式：普通播放", "roam_loop")
         self.preview_scenario_combo.addItem("比赛开始：TrackDrop/TrackStart → TrackLoop", "race_start")
-        self.preview_scenario_combo.addItem("比赛进行：TrackLoop 循环", "race_loop")
-        self.preview_scenario_combo.addItem("冲线：PostDrop 前后预览", "finish")
-        self.preview_scenario_combo.addItem("冲线后：PostRaceLoop 循环", "post_loop")
+        self.preview_scenario_combo.addItem("比赛进行：LoopEnd 前衔接试听", "race_loop")
+        self.preview_scenario_combo.addItem("冲线：从 PostDrop 开始", "finish")
+        self.preview_scenario_combo.addItem("冲线后：PostLoopEnd 前衔接试听", "post_loop")
         self.seek_slider = QSlider(Qt.Horizontal)
         self.seek_slider.setRange(0, 0)
         self.waveform = WaveformWidget(self)
@@ -766,6 +768,8 @@ class MainWindow(QMainWindow):
         self.update_step_navigation()
 
         self.station_combo.currentIndexChanged.connect(self.reload_slots)
+        self.slot_table.itemSelectionChanged.connect(self.update_assignment_selection_counts)
+        self.slot_table.itemChanged.connect(self.on_slot_table_item_changed)
         self.music_table.itemSelectionChanged.connect(self.on_music_selection_changed)
         self.music_table.itemChanged.connect(self.on_music_table_item_changed)
         self.loop_audio_combo.currentIndexChanged.connect(self.on_loop_audio_changed)
@@ -1098,20 +1102,20 @@ class MainWindow(QMainWindow):
         station_bar.addWidget(self.btn_clear_assignment)
         outer.addLayout(station_bar)
 
-        self.station_profile_label = QLabel("")
-        self.station_profile_label.setWordWrap(True)
-        self.station_profile_label.setObjectName("HintText")
-        self.station_profile_label.setVisible(False)
-        outer.addWidget(self.station_profile_label)
-
         left_card = QGroupBox()
         left = QVBoxLayout(left_card)
         left.setSpacing(4)
         left.setContentsMargins(8, 6, 8, 8)
         self.left_title = QLabel("勾选需要替换的游戏原曲槽位")
         self.left_title.setObjectName("SectionTitle")
-        self.left_title.setAlignment(Qt.AlignCenter)
-        left.addWidget(self.left_title)
+        self.left_title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.slot_count_label = QLabel("")
+        self.slot_count_label.setObjectName("CompactHint")
+        left_header = QHBoxLayout()
+        left_header.setSpacing(6)
+        left_header.addWidget(self.left_title, 1)
+        left_header.addWidget(self.slot_count_label)
+        left.addLayout(left_header)
         self.slot_table.setMinimumHeight(250)
         left.addWidget(self.slot_table, 1)
 
@@ -1121,8 +1125,14 @@ class MainWindow(QMainWindow):
         right.setContentsMargins(8, 6, 8, 8)
         self.right_title = QLabel("勾选自己的音乐文件")
         self.right_title.setObjectName("SectionTitle")
-        self.right_title.setAlignment(Qt.AlignCenter)
-        right.addWidget(self.right_title)
+        self.right_title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.music_count_label = QLabel("")
+        self.music_count_label.setObjectName("CompactHint")
+        right_header = QHBoxLayout()
+        right_header.setSpacing(6)
+        right_header.addWidget(self.right_title, 1)
+        right_header.addWidget(self.music_count_label)
+        right.addLayout(right_header)
         self.music_table.setMinimumHeight(250)
         right.addWidget(self.music_table, 1)
 
@@ -1697,19 +1707,19 @@ class MainWindow(QMainWindow):
             self.preview_scenario_combo.clear()
             if en:
                 scenarios = [
-                    ("Free roam: Track Loop", "roam_loop"),
+                    ("Free roam: normal playback", "roam_loop"),
                     ("Race start: TrackDrop/TrackStart to TrackLoop", "race_start"),
-                    ("Race loop: TrackLoop", "race_loop"),
-                    ("Finish: preview around PostDrop", "finish"),
-                    ("Post-race: PostRaceLoop", "post_loop"),
+                    ("Race loop: preview before LoopEnd", "race_loop"),
+                    ("Finish: start at PostDrop", "finish"),
+                    ("Post-race: preview before PostLoopEnd", "post_loop"),
                 ]
             else:
                 scenarios = [
-                    ("漫游模式：Track Loop 循环", "roam_loop"),
+                    ("漫游模式：普通播放", "roam_loop"),
                     ("比赛开始：TrackDrop/TrackStart → TrackLoop", "race_start"),
-                    ("比赛进行：TrackLoop 循环", "race_loop"),
-                    ("冲线：PostDrop 前后预览", "finish"),
-                    ("冲线后：PostRaceLoop 循环", "post_loop"),
+                    ("比赛进行：LoopEnd 前衔接试听", "race_loop"),
+                    ("冲线：从 PostDrop 开始", "finish"),
+                    ("冲线后：PostLoopEnd 前衔接试听", "post_loop"),
                 ]
             for text, data in scenarios:
                 self.preview_scenario_combo.addItem(text, data)
@@ -1743,14 +1753,13 @@ class MainWindow(QMainWindow):
             ["选择\n全选", "文件名", "Artist", "格式", "采样率", "时长", "已保存设置", "路径"]
         )
         self.apply_table_layout()
-        if hasattr(self, 'station_profile_label'):
-            self._update_station_profile_label()
         if hasattr(self, 'assign_hint'):
             self.assign_hint.setText(
-                "Tip: click the first column header to select/clear all. Check N game slots and N music files, then click Apply replacement."
+                "Tip: drag-select multiple rows, then click one checkbox to apply the same check state to the selected rows. Click the first column header to check/clear all."
                 if en else
-                "提示：点击表格第一列标题可全选/取消；左侧勾选 N 个槽位，右侧勾选 N 首音乐，然后点“应用选择替换”。"
+                "提示：可框选多行后点击其中一个勾选框，批量应用相同勾选状态；点击第一列标题可全选/取消。"
             )
+        self.update_assignment_selection_counts()
         if hasattr(self, 'final_box'):
             self.final_box.setTitle("Build and install / normal users only need this" if en else "生成与安装 / 普通玩家只需要这里")
         if hasattr(self, 'final_hint'):
@@ -2420,6 +2429,9 @@ class MainWindow(QMainWindow):
         path, so it should no longer mark a station as limited merely because
         the raw XML contains hidden *_ID/*_LI aliases.
         """
+        if self._dynamic_station_slot_profiles_cache is not None:
+            return self._dynamic_station_slot_profiles_cache
+
         def to_int(value, default: int = 0) -> int:
             try:
                 return int(str(value or "").strip())
@@ -2487,6 +2499,7 @@ class MainWindow(QMainWindow):
                         }
             except Exception as exc:
                 self.log(f"[WARN] 读取电台槽位画像失败: {path}: {exc}")
+        self._dynamic_station_slot_profiles_cache = profiles
         return profiles
 
     def _station_slot_profile(self, station_name: str | None = None, xml_tracks: int | None = None) -> dict[str, object] | None:
@@ -2551,11 +2564,59 @@ class MainWindow(QMainWindow):
             return None
         return profile
 
-    def _station_slot_profile_text(self, profile: dict[str, object] | None) -> str:
-        # Keep the main UI simple for normal players.  The detailed XML-vs-FMOD
-        # difference is still written to diagnostic CSV files, but the visible
-        # UI should only show the usable slot count.
-        return ""
+    def _station_replaceable_counts(
+        self,
+        profile: dict[str, object] | None,
+        fallback_xml_tracks: int = 0,
+    ) -> tuple[int, int, int]:
+        try:
+            xml_n = int((profile or {}).get("xml_tracks") or fallback_xml_tracks or 0)
+        except Exception:
+            xml_n = int(fallback_xml_tracks or 0)
+        try:
+            non = {int(x) for x in (profile or {}).get("non_replaceable_slots", [])}
+        except Exception:
+            non = set()
+        try:
+            fmod_n = int((profile or {}).get("fmod_audio_slots") or 0)
+        except Exception:
+            fmod_n = 0
+        if xml_n > 0 and non:
+            replaceable = max(0, xml_n - len(non))
+        elif fmod_n > 0:
+            replaceable = fmod_n
+        else:
+            replaceable = xml_n
+        if xml_n > 0:
+            replaceable = min(replaceable, xml_n)
+        return replaceable, xml_n, len(non)
+
+    def _station_slot_profile_text(
+        self,
+        profile: dict[str, object] | None,
+        xml_tracks: int | None = None,
+    ) -> str:
+        fallback = int(xml_tracks or 0)
+        if fallback <= 0:
+            station = self.current_station_name()
+            for st in getattr(self, "station_infos", []) or []:
+                if getattr(st, "name", "") == station:
+                    fallback = int(getattr(st, "track_slot_count", 0) or 0)
+                    break
+        replaceable, xml_n, hidden_n = self._station_replaceable_counts(profile, fallback)
+        if self.ui_lang() == "en":
+            base = f"Replaceable slots: {replaceable}"
+            if xml_n:
+                base += f" / XML entries: {xml_n}"
+            if hidden_n:
+                base += f"; {hidden_n} XML-only/alias row(s) hidden."
+            return base
+        base = f"当前电台可替换槽位：{replaceable}"
+        if xml_n:
+            base += f" / XML 曲目：{xml_n}"
+        if hidden_n:
+            base += f"；已隐藏 {hidden_n} 个仅 XML/别名槽位。"
+        return base
 
     def _is_slot_replaceable(self, slot: int, profile: dict[str, object] | None = None) -> bool:
         if not profile:
@@ -2567,15 +2628,10 @@ class MainWindow(QMainWindow):
         return int(slot) not in non
 
     def _slot_row_replaceable(self, row_index: int) -> bool:
-        item = self.slot_table.item(row_index, 1)
-        if not item:
-            return True
-        try:
-            slot = int(item.text())
-        except Exception:
-            return True
-        profile = self._station_slot_profile(self.current_station_name(), self.slot_table.rowCount())
-        return self._is_slot_replaceable(slot, profile)
+        # reload_slots already filters out XML-only / non-replaceable entries.
+        # Keep this check O(1); calling _station_slot_profile for every table
+        # row during selection updates made the UI stutter on large stations.
+        return 0 <= int(row_index) < self.slot_table.rowCount()
 
     def _refresh_station_combo_labels(self) -> None:
         if not hasattr(self, "station_combo"):
@@ -2595,20 +2651,23 @@ class MainWindow(QMainWindow):
         self._refresh_station_combo_width()
 
     def _station_combo_label(self, station_info) -> str:
-        profile = self._station_slot_profile(getattr(station_info, "name", ""), int(getattr(station_info, "track_slot_count", 0) or 0))
-        if profile:
-            xml_n = int(profile.get("xml_tracks") or getattr(station_info, "track_slot_count", 0) or 0)
-            fmod_n = int(profile.get("fmod_audio_slots") or max(0, xml_n - len(profile.get("non_replaceable_slots", []))))
-            suffix = f"{fmod_n} slots" if self.ui_lang() == "en" else f"槽位 {fmod_n}"
-            return f"{station_info.name}  ({suffix})"
-        suffix = f"{station_info.track_slot_count} tracks" if self.ui_lang() == "en" else f"槽位 {station_info.track_slot_count}"
+        xml_n = int(getattr(station_info, "track_slot_count", 0) or 0)
+        station_name = str(getattr(station_info, "name", "") or "")
+        built_in = KNOWN_STATION_SLOT_PROFILES.get(station_name)
+        dynamic = None if station_name in KNOWN_MULTI_TRACK_COMPLETE_STATIONS else self._dynamic_station_slot_profiles().get(station_name)
+        profile = built_in or dynamic
+        replaceable, xml_total, _hidden = self._station_replaceable_counts(profile, xml_n)
+        if self.ui_lang() == "en":
+            suffix = f"replaceable {replaceable}"
+        else:
+            suffix = f"可替换 {replaceable}"
         return f"{station_info.name}  ({suffix})"
 
     def _update_station_profile_label(self, station: str | None = None, xml_tracks: int | None = None) -> None:
         if not hasattr(self, "station_profile_label"):
             return
         profile = self._station_slot_profile(station or self.current_station_name(), xml_tracks)
-        text = self._station_slot_profile_text(profile)
+        text = self._station_slot_profile_text(profile, xml_tracks)
         self.station_profile_label.setText(text)
         self.station_profile_label.setVisible(bool(text))
 
@@ -2623,7 +2682,6 @@ class MainWindow(QMainWindow):
             from .order_tools import station_sample_rows
             rows = station_sample_rows(self.current_xml, station)
             profile_info = self._station_slot_profile(station, len(rows))
-            self._update_station_profile_label(station, len(rows))
             # Hide XML-only / non-replaceable rows from the normal player-facing
             # list.  The diagnostic reports still keep those XML entries, but
             # the interactive replacement UI should only expose real FMOD audio
@@ -2650,6 +2708,7 @@ class MainWindow(QMainWindow):
                 set_item(self.slot_table, i, 7, profile.filename if profile else "")
                 set_item(self.slot_table, i, 8, marker_text)
                 set_item(self.slot_table, i, 9, status)
+            self.update_assignment_selection_counts()
         except Exception as exc:
             self.show_error("刷新槽位失败", exc)
 
@@ -2739,6 +2798,7 @@ class MainWindow(QMainWindow):
             self.store.set_setting("music_dir", str(folder))
             if not quiet:
                 self.log(f"[OK] 音乐扫描完成: {len(self.audio_paths)} 首")
+            self.update_assignment_selection_counts()
             self._auto_hide_setup_if_ready()
 
         if quiet:
@@ -2784,6 +2844,11 @@ class MainWindow(QMainWindow):
         if section == 0:
             self.toggle_all_music_checks()
 
+    def on_slot_table_item_changed(self, item: QTableWidgetItem) -> None:
+        if item is not None and item.column() == 0:
+            self.propagate_check_to_selected_rows(self.slot_table, item)
+            self.update_assignment_selection_counts()
+
     def checked_table_rows(self, table: QTableWidget, check_col: int = 0) -> list[int]:
         rows: list[int] = []
         for r in range(table.rowCount()):
@@ -2803,26 +2868,67 @@ class MainWindow(QMainWindow):
     def selected_slot_rows(self) -> list[int]:
         checked = self.checked_table_rows(self.slot_table, 0)
         rows = checked if checked else self.selected_table_rows(self.slot_table)
-        return [r for r in rows if self._slot_row_replaceable(r)]
+        return rows
 
     def selected_music_rows(self) -> list[int]:
         checked = self.checked_table_rows(self.music_table, 0)
         return checked if checked else self.selected_table_rows(self.music_table)
+
+    def propagate_check_to_selected_rows(
+        self,
+        table: QTableWidget,
+        changed_item: QTableWidgetItem,
+    ) -> None:
+        if self._syncing_table_checks or changed_item is None or changed_item.column() != 0:
+            return
+        rows = self.selected_table_rows(table)
+        if len(rows) <= 1 or changed_item.row() not in rows:
+            return
+        self._syncing_table_checks = True
+        state = changed_item.checkState()
+        try:
+            for r in rows:
+                if r == changed_item.row() or r < 0 or r >= table.rowCount():
+                    continue
+                item = table.item(r, 0)
+                if item:
+                    item.setCheckState(state)
+        finally:
+            self._syncing_table_checks = False
+
+    def set_table_checks_for_rows(self, table: QTableWidget, rows: list[int], checked: bool) -> None:
+        for r in rows:
+            if r < 0 or r >= table.rowCount():
+                continue
+            item = table.item(r, 0)
+            if item:
+                item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+        self.update_assignment_selection_counts()
+
+    def set_selected_slot_checks(self, checked: bool) -> None:
+        rows = self.selected_table_rows(self.slot_table)
+        self.set_table_checks_for_rows(self.slot_table, rows, checked)
+
+    def set_selected_music_checks(self, checked: bool) -> None:
+        rows = self.selected_table_rows(self.music_table)
+        self.set_table_checks_for_rows(self.music_table, rows, checked)
 
     def set_all_slot_checks(self, checked: bool) -> None:
         for r in range(self.slot_table.rowCount()):
             item = self.slot_table.item(r, 0)
             if item and self._slot_row_replaceable(r):
                 item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+        self.update_assignment_selection_counts()
 
     def set_all_music_checks(self, checked: bool) -> None:
         for r in range(self.music_table.rowCount()):
             item = self.music_table.item(r, 0)
             if item:
                 item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+        self.update_assignment_selection_counts()
 
     def toggle_all_slot_checks(self) -> None:
-        total = sum(1 for r in range(self.slot_table.rowCount()) if self._slot_row_replaceable(r))
+        total = self.slot_table.rowCount()
         checked = len(self.checked_table_rows(self.slot_table, 0))
         self.set_all_slot_checks(not (total > 0 and checked == total))
 
@@ -2830,6 +2936,22 @@ class MainWindow(QMainWindow):
         total = self.music_table.rowCount()
         checked = len(self.checked_table_rows(self.music_table, 0))
         self.set_all_music_checks(not (total > 0 and checked == total))
+
+    def update_assignment_selection_counts(self) -> None:
+        if not hasattr(self, "slot_count_label") or not hasattr(self, "music_count_label"):
+            return
+        slot_total = self.slot_table.rowCount()
+        slot_checked = len(self.checked_table_rows(self.slot_table, 0))
+        slot_selected = len(self.selected_table_rows(self.slot_table))
+        music_total = self.music_table.rowCount()
+        music_checked = len(self.checked_table_rows(self.music_table, 0))
+        music_selected = len(self.selected_table_rows(self.music_table))
+        if self.ui_lang() == "en":
+            self.slot_count_label.setText(f"checked {slot_checked}/{slot_total}, selected {slot_selected}")
+            self.music_count_label.setText(f"checked {music_checked}/{music_total}, selected {music_selected}")
+        else:
+            self.slot_count_label.setText(f"已勾选 {slot_checked}/{slot_total}，选中 {slot_selected}")
+            self.music_count_label.setText(f"已勾选 {music_checked}/{music_total}，选中 {music_selected}")
 
     def slot_info_from_row(self, row: int) -> tuple[int, str, str, str]:
         slot_item = self.slot_table.item(row, 1)
@@ -3048,6 +3170,7 @@ class MainWindow(QMainWindow):
         self.reload_slots()
 
     def on_music_selection_changed(self):
+        self.update_assignment_selection_counts()
         sel = self.selected_music_path_and_key()
         if not sel:
             return
@@ -3078,6 +3201,10 @@ class MainWindow(QMainWindow):
 
     def on_music_table_item_changed(self, item: QTableWidgetItem):
         """Persist the editable Artist column from the user's music list."""
+        if item is not None and item.column() == 0:
+            self.propagate_check_to_selected_rows(self.music_table, item)
+            self.update_assignment_selection_counts()
+            return
         if self._populating_music_table or item is None or item.column() != 2:
             return
         try:
@@ -3096,6 +3223,8 @@ class MainWindow(QMainWindow):
             self.store.save_track_profile(profile)
         except Exception as exc:
             self.log(f"[WARN] 保存 Artist 失败: {exc}")
+        finally:
+            self.update_assignment_selection_counts()
 
     def on_loop_audio_changed(self):
         data = self.loop_audio_combo.currentData()

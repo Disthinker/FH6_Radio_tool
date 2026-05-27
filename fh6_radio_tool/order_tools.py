@@ -136,9 +136,13 @@ def import_fmod_extract_folder(src: Path, target_dir: Path) -> Path:
 
     records = parse_extract_template(dst)
     if not records:
+        txt_count = sum(1 for p in dst.rglob("*") if p.is_file() and p.suffix.lower() == ".txt")
+        wav_count = sum(1 for p in dst.rglob("*") if p.is_file() and p.suffix.lower() == ".wav")
         raise ValueError(
-            "导入的目录中没有识别到 Fmod Bank Tools 的提取 txt。"
-            "请选择 Fmod Bank Tools 的 Wav Output Directory，里面应包含 *.txt 和对应 wav 子目录。"
+            "自动 Extract 输出目录已生成，但没有识别到可用于 Rebuild 的 Fmod Bank Tools 提取清单。"
+            f"目录={dst}；txt={txt_count}，wav={wav_count}。"
+            "这通常是 Fmod Bank Tools 输出为空、输出被安全软件/权限拦截，或提取清单编码/格式异常。"
+            "请不要手动选择目录；请关闭 Fmod Bank Tools 后重新执行一键替换，并把 Runtime Log 发给作者。"
         )
     return dst
 
@@ -234,13 +238,23 @@ def _find_record_for_cross_bank_override(item: dict[str, str], records: list[Ext
     return None
 
 def _read_txt_lines(path: Path) -> list[str]:
+    raw = ""
     try:
-        raw = path.read_text(encoding="utf-8-sig", errors="ignore")
+        data = path.read_bytes()
     except Exception:
-        return []
+        data = b""
+    if data:
+        for encoding in ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "gbk"):
+            try:
+                raw = data.decode(encoding)
+                break
+            except Exception:
+                continue
+        if not raw:
+            raw = data.decode("utf-8", errors="ignore")
     lines = []
     for line in str(raw or "").splitlines():
-        line = str(line or "").strip()
+        line = str(line or "").replace("\x00", "").strip()
         if not line or line.startswith("#") or line.startswith("//"):
             continue
         lines.append(line)
